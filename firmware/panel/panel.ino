@@ -5,10 +5,23 @@
 
 // ===================== AP + Web Login =====================
 const char* AP_SSID = "ESP32-OTA";
-const char* AP_PASS = "12345678";       // >= 8 Zeichen oder "" (offen)
+const char* AP_PASS = "12345678";       // >=8 Zeichen oder "" (offen)
 
 const char* WWW_USER = "admin";         // Web-Login
 const char* WWW_PASS = "admin123";
+
+// ===================== Pins =====================
+// TFT
+static constexpr int TFT_SCK  = 18;
+static constexpr int TFT_MOSI = 23;
+static constexpr int TFT_MISO = 19;     // empfohlen
+static constexpr int TFT_DC   = 21;
+static constexpr int TFT_CS   = 5;
+static constexpr int TFT_RST  = 22;
+
+// Touch (XPT2046)
+static constexpr int TOUCH_CS  = 27;
+static constexpr int TOUCH_IRQ = 33;    // wenn nicht angeschlossen: -1
 
 WebServer server(80);
 
@@ -24,20 +37,20 @@ public:
       auto cfg = _bus.config();
       cfg.spi_host   = VSPI_HOST;
       cfg.spi_mode   = 0;
-      cfg.freq_write = 27000000;   // 27MHz = stabil; wenn's sicher läuft -> 40000000 testen
+      cfg.freq_write = 27000000;   // stabil. Wenn sauber: 40000000 testen
       cfg.freq_read  = 16000000;
-      cfg.pin_sclk   = 18;
-      cfg.pin_mosi   = 23;
-      cfg.pin_miso   = 19;         // empfohlen
-      cfg.pin_dc     = 21;         // D/C
+      cfg.pin_sclk   = TFT_SCK;
+      cfg.pin_mosi   = TFT_MOSI;
+      cfg.pin_miso   = TFT_MISO;
+      cfg.pin_dc     = TFT_DC;
       _bus.config(cfg);
       _panel.setBus(&_bus);
     }
 
     { // --- Panel ---
       auto cfg = _panel.config();
-      cfg.pin_cs   = 5;
-      cfg.pin_rst  = 22;
+      cfg.pin_cs   = TFT_CS;
+      cfg.pin_rst  = TFT_RST;
       cfg.pin_busy = -1;
 
       cfg.panel_width  = 320;
@@ -46,9 +59,7 @@ public:
       cfg.offset_x = 0;
       cfg.offset_y = 0;
 
-      cfg.rotation = 1;     // falls falsch: 0..3 testen
-      cfg.invert   = false; // falls Farben komisch: true/false wechseln
-
+      cfg.invert   = false;  // wenn Farben falsch: true/false wechseln
       _panel.config(cfg);
     }
 
@@ -57,16 +68,18 @@ public:
       cfg.x_min = 0;  cfg.x_max = 319;
       cfg.y_min = 0;  cfg.y_max = 479;
 
-      cfg.pin_int = 33;          // T_IRQ; wenn nicht angeschlossen: -1 setzen
+      cfg.pin_int = TOUCH_IRQ;     // -1 wenn nicht genutzt
       cfg.bus_shared = true;
-      cfg.offset_rotation = 1;   // muss meist zur Display-Rotation passen
+
+      // Muss zur lcd.setRotation() passen. Startwert:
+      cfg.offset_rotation = 1;
 
       cfg.spi_host = VSPI_HOST;
       cfg.freq     = 2000000;
-      cfg.pin_sclk = 18;
-      cfg.pin_mosi = 23;
-      cfg.pin_miso = 19;
-      cfg.pin_cs   = 27;         // T_CS
+      cfg.pin_sclk = TFT_SCK;
+      cfg.pin_mosi = TFT_MOSI;
+      cfg.pin_miso = TFT_MISO;
+      cfg.pin_cs   = TOUCH_CS;
 
       _touch.config(cfg);
       _panel.setTouch(&_touch);
@@ -106,7 +119,7 @@ static const char UPDATE_HTML[] PROGMEM = R"HTML(
 </body></html>
 )HTML";
 
-bool checkAuth() {
+static inline bool checkAuth() {
   if (!server.authenticate(WWW_USER, WWW_PASS)) {
     server.requestAuthentication();
     return false;
@@ -114,7 +127,7 @@ bool checkAuth() {
   return true;
 }
 
-// ===================== Setup AP =====================
+// ===================== AP Setup =====================
 void setupAP() {
   WiFi.mode(WIFI_AP);
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
@@ -143,7 +156,7 @@ void setupAP() {
   lcd.println("/update");
 }
 
-// ===================== Webserver Routen + OTA =====================
+// ===================== Webserver + OTA =====================
 void setupWeb() {
   server.on("/", HTTP_GET, []() {
     if (!checkAuth()) return;
@@ -180,27 +193,19 @@ void setupWeb() {
       HTTPUpload& up = server.upload();
 
       if (up.status == UPLOAD_FILE_START) {
-        // Display kurz Hinweis
-        lcd.fillRect(0, 200, 320, 60, TFT_BLACK);
+        lcd.fillRect(0, 200, 320, 80, TFT_BLACK);
         lcd.setCursor(10, 200);
         lcd.setTextColor(TFT_CYAN);
         lcd.println("OTA Upload...");
 
-        // Start OTA
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-          // Fehler -> auf Display/Serial
           lcd.setTextColor(TFT_RED);
           lcd.println("Update.begin FAIL");
         }
-      }
-      else if (up.status == UPLOAD_FILE_WRITE) {
-        // Chunk schreiben
+      } else if (up.status == UPLOAD_FILE_WRITE) {
         size_t w = Update.write(up.buf, up.currentSize);
-        if (w != up.currentSize) {
-          // Schreibfehler
-        }
-      }
-      else if (up.status == UPLOAD_FILE_END) {
+        (void)w; // wenn w != currentSize -> Update.hasError() wird true
+      } else if (up.status == UPLOAD_FILE_END) {
         if (Update.end(true)) {
           lcd.setTextColor(TFT_GREEN);
           lcd.println("Upload OK");
@@ -208,8 +213,7 @@ void setupWeb() {
           lcd.setTextColor(TFT_RED);
           lcd.println("Upload FAIL");
         }
-      }
-      else if (up.status == UPLOAD_FILE_ABORTED) {
+      } else if (up.status == UPLOAD_FILE_ABORTED) {
         Update.end();
         lcd.setTextColor(TFT_RED);
         lcd.println("Upload ABORT");
@@ -226,10 +230,10 @@ void setup() {
   Serial.begin(115200);
 
   lcd.init();
-  lcd.setRotation(1);
+  lcd.setRotation(1);          // HIER gehört Rotation hin (LovyanGFX aktuell)
   lcd.fillScreen(TFT_BLACK);
 
-  // simpler Farbtest
+  // kurzer Farbtest
   lcd.fillRect(0, 280, 320, 40, TFT_RED);
   lcd.fillRect(0, 320, 320, 40, TFT_GREEN);
   lcd.fillRect(0, 360, 320, 40, TFT_BLUE);
@@ -241,7 +245,7 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // Touch-Visualisierung (läuft auch neben WebServer, außer während Upload blockiert)
+  // Touch-Punkt zeichnen
   uint16_t x, y;
   if (lcd.getTouch(&x, &y)) {
     lcd.fillCircle(x, y, 3, TFT_WHITE);
