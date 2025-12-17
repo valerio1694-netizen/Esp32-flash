@@ -36,7 +36,7 @@ jobs:
             --warnings default \
             --export-binaries \
             --output-dir build \
-            firmware/panel.ino
+            firmware/panel
 
       - name: Upload build artifacts (.bin)
         uses: actions/upload-artifact@v4
