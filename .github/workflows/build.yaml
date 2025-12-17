@@ -23,11 +23,14 @@ jobs:
 
       - name: Install libraries
         run: |
-         arduino-cli lib update-index
-         arduino-cli lib install "LovyanGFX"
-         arduino-cli lib install "FastLED"
-         arduino-cli lib install "Adafruit PWM Servo Driver Library"
-         arduino-cli lib install "Adafruit BusIO"
+          arduino-cli lib update-index
+          arduino-cli lib install "LovyanGFX"
+          arduino-cli lib install "FastLED"
+          arduino-cli lib install "Adafruit PWM Servo Driver Library"
+          arduino-cli lib install "Adafruit BusIO"
+          arduino-cli lib install "AsyncElegantOTA"
+          arduino-cli lib install "AsyncTCP"
+          arduino-cli lib install "ESPAsyncWebServer"
 
       - name: Compile firmware (export binaries)
         run: |
@@ -37,7 +40,7 @@ jobs:
             --warnings default \
             --export-binaries \
             --output-dir build \
-            firmware/panel/panel.ino
+            firmware/firmware.ino
 
       - name: Upload build artifacts (.bin)
         uses: actions/upload-artifact@v4
