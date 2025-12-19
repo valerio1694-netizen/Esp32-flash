@@ -46,9 +46,8 @@ jobs:
           #define SPI_FREQUENCY  27000000
           EOF
 
-      - name: Compile firmware (OTA)
+      - name: Compile firmware
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
-            --build-property build.partitions=default_ota \
             firmware/panel
