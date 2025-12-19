@@ -17,14 +17,9 @@ static constexpr int TFT_BL    = 32;
 static constexpr int TOUCH_CS  = 27;
 static constexpr int TOUCH_IRQ = 33;
 
-static constexpr int SPI_SCK  = 18;
-static constexpr int SPI_MISO = 19;
-static constexpr int SPI_MOSI = 23;
-
 /* ================= HW ================= */
 TFT_eSPI tft;
 XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
-SPIClass& spi = SPI;
 Preferences prefs;
 
 /* ================= TOUCH CAL ================= */
@@ -32,8 +27,6 @@ struct Cal {
   uint16_t minX, maxX, minY, maxY;
   bool swapXY, invX, invY, valid;
 } cal;
-
-bool calibrating = false;
 
 /* ================= UI ================= */
 enum Mode { DEMO, PAINT, INFO };
@@ -86,74 +79,4 @@ void drawUI() {
 void setupOTA() {
   server.on("/update", HTTP_GET, [](){
     server.send(200,"text/html",
-      "<form method='POST' action='/update' enctype='multipart/form-data'>"
-      "<input type='file' name='update'>"
-      "<input type='submit'></form>");
-  });
-
-  server.on("/update", HTTP_POST,
-    [](){ server.send(200); ESP.restart(); },
-    [](){
-      HTTPUpload& u = server.upload();
-      if(u.status == UPLOAD_FILE_START) Update.begin();
-      else if(u.status == UPLOAD_FILE_WRITE) Update.write(u.buf,u.currentSize);
-      else if(u.status == UPLOAD_FILE_END) Update.end(true);
-    }
-  );
-
-  server.begin();
-}
-
-/* ================= SETUP ================= */
-void setup() {
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
-
-  pinMode(TOUCH_IRQ, INPUT_PULLUP);
-  spi.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-
-  tft.init();
-  tft.setRotation(1);
-
-  ts.begin(spi);
-
-  prefs.begin("touch", true);
-  cal.valid = prefs.getBool("valid", false);
-  if(cal.valid){
-    cal.minX = prefs.getUShort("minX");
-    cal.maxX = prefs.getUShort("maxX");
-    cal.minY = prefs.getUShort("minY");
-    cal.maxY = prefs.getUShort("maxY");
-    cal.swapXY = prefs.getBool("swap");
-    cal.invX   = prefs.getBool("invX");
-    cal.invY   = prefs.getBool("invY");
-  }
-  prefs.end();
-
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);
-  setupOTA();
-
-  drawUI();
-}
-
-/* ================= LOOP ================= */
-void loop() {
-  server.handleClient();
-
-  uint16_t x,y;
-  if(readTouch(x,y)) {
-    if(y<80){
-      if(x<110) mode=DEMO;
-      else if(x<210) mode=PAINT;
-      else mode=INFO;
-      drawUI();
-      delay(250);
-      return;
-    }
-
-    if(mode==PAINT){
-      tft.fillCircle(x,y,5,TFT_RED);
-    }
-  }
-}
+      "<form method
