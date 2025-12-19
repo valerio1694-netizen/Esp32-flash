@@ -33,7 +33,7 @@ jobs:
           TFT_DIR="$HOME/Arduino/libraries/TFT_eSPI"
           cat > "$TFT_DIR/User_Setup.h" <<'EOF'
           // ---- Driver ----
-          #define ILI9488_DRIVER
+          #define ILI9486_DRIVER
 
           // ---- Panel size (4.0" typical) ----
           #define TFT_WIDTH  480
