@@ -32,23 +32,22 @@ jobs:
         run: |
           TFT_DIR="$HOME/Arduino/libraries/TFT_eSPI"
           cat > "$TFT_DIR/User_Setup.h" <<'EOF'
-          // ---- Driver ----
           #define ILI9486_DRIVER
 
-          // ---- Panel size (4.0" typical) ----
           #define TFT_WIDTH  480
           #define TFT_HEIGHT 320
 
-          // ---- VSPI Pins ----
-          #define TFT_MISO 19
           #define TFT_MOSI 23
           #define TFT_SCLK 18
           #define TFT_CS    5
           #define TFT_DC   21
           #define TFT_RST  22
+          // MISO absichtlich NICHT definiert
 
-          // ---- SPI speed ----
-          #define SPI_FREQUENCY  27000000
+          #define TFT_RGB_ORDER TFT_BGR
+
+          #define SPI_FREQUENCY        16000000
+          #define SPI_READ_FREQUENCY   8000000
           EOF
 
       - name: Compile firmware (export binaries)
