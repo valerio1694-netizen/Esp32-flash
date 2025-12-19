@@ -3,7 +3,9 @@
 #include <Update.h>
 #include <SPI.h>
 #include <Preferences.h>
-#include <LovyanGFX.hpp>
+
+#include <TFT_eSPI.h>
+#include <XPT2046_Touchscreen.h>
 
 // ===================== AP / OTA =====================
 const char* AP_SSID = "ESP32-OTA";
@@ -11,127 +13,60 @@ const char* AP_PASS = "12345678";   // >=8 Zeichen oder "" offen
 WebServer server(80);
 
 // ===================== Pins =====================
-static constexpr int TFT_SCK  = 18;
-static constexpr int TFT_MOSI = 23;
-static constexpr int TFT_MISO = 19;
-static constexpr int TFT_CS   = 5;
-static constexpr int TFT_DC   = 21;
-static constexpr int TFT_RST  = 22;
-static constexpr int TFT_BL   = 32;
+static constexpr int TFT_BL   = 32;   // Backlight (manuell)
+static constexpr int TOUCH_CS  = 27;
+static constexpr int TOUCH_IRQ = 33;  // du hast IRQ an GPIO33
 
-static constexpr int TOUCH_CS = 27;
+// SPI (shared VSPI)
+static constexpr int SPI_SCK  = 18;
+static constexpr int SPI_MISO = 19;
+static constexpr int SPI_MOSI = 23;
 
-// ===================== Forward declarations =====================
-void setupWeb();
-void handleTouchPaint();
-void startCalibration();
-bool mapTouchToScreen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy);
+// ===================== Display / Touch =====================
+TFT_eSPI tft;
+XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
+SPIClass& spi = SPI;
 
-// ===================== TFT via LovyanGFX (Display only) =====================
-class LGFX : public lgfx::LGFX_Device {
-  lgfx::Panel_ILI9488 _panel;
-  lgfx::Bus_SPI _bus;
-public:
-  LGFX() {
-    { // SPI
-      auto cfg = _bus.config();
-      cfg.spi_host   = VSPI_HOST;
-      cfg.spi_mode   = 0;
-      cfg.freq_write = 27000000;   // stabil
-      cfg.freq_read  = 16000000;
-      cfg.pin_sclk   = TFT_SCK;
-      cfg.pin_mosi   = TFT_MOSI;
-      cfg.pin_miso   = TFT_MISO;
-      cfg.pin_dc     = TFT_DC;
-      _bus.config(cfg);
-      _panel.setBus(&_bus);
-    }
-    { // Panel
-      auto cfg = _panel.config();
-      cfg.pin_cs   = TFT_CS;
-      cfg.pin_rst  = TFT_RST;
-      cfg.pin_busy = -1;
-      cfg.panel_width  = 320;
-      cfg.panel_height = 480;
-      cfg.offset_x = 0;
-      cfg.offset_y = 0;
-      cfg.invert = false;          // falls Farben komisch: true/false
-      _panel.config(cfg);
-    }
-    setPanel(&_panel);
-  }
-};
-LGFX lcd;
-
-// ===================== XPT2046 RAW via SPI =====================
-SPIClass vspi(VSPI);
-SPISettings touchSPI(2000000, MSBFIRST, SPI_MODE0);
-
-static constexpr uint8_t CMD_X = 0xD0; // X position
-static constexpr uint8_t CMD_Y = 0x90; // Y position
-
-uint16_t xpt2046_read12(uint8_t cmd) {
-  vspi.beginTransaction(touchSPI);
-  digitalWrite(TOUCH_CS, LOW);
-  vspi.transfer(cmd);
-  uint16_t v = vspi.transfer16(0x0000);
-  digitalWrite(TOUCH_CS, HIGH);
-  vspi.endTransaction();
-  return (v >> 3) & 0x0FFF;
-}
-
-bool xpt2046_readXY(uint16_t &rx, uint16_t &ry) {
-  // Dummy reads (manche Boards brauchen das)
-  (void)xpt2046_read12(CMD_X);
-  (void)xpt2046_read12(CMD_Y);
-
-  uint16_t x1 = xpt2046_read12(CMD_X);
-  uint16_t y1 = xpt2046_read12(CMD_Y);
-  uint16_t x2 = xpt2046_read12(CMD_X);
-  uint16_t y2 = xpt2046_read12(CMD_Y);
-
-  // typische "tot" Werte:
-  if ((x1 == 0 && y1 == 0) || (x1 == 4095 && y1 == 4095)) return false;
-  if ((x2 == 0 && y2 == 0) || (x2 == 4095 && y2 == 4095)) return false;
-
-  auto diff = [](uint16_t a, uint16_t b){ return (a > b) ? (a - b) : (b - a); };
-  if (diff(x1, x2) > 250 || diff(y1, y2) > 250) return false;
-
-  rx = (x1 + x2) / 2;
-  ry = (y1 + y2) / 2;
-  return true;
-}
-
-// ===================== Calibration data (persist) =====================
-struct CalData {
-  uint16_t rawMinX = 200;
-  uint16_t rawMaxX = 3800;
-  uint16_t rawMinY = 200;
-  uint16_t rawMaxY = 3800;
-  bool swapXY = true;
-  bool invX = true;
-  bool invY = false;
-  bool valid = false;
-};
-
+// ===================== Persistent Calibration =====================
 Preferences prefs;
+
+struct CalData {
+  uint16_t minX=200, maxX=3800, minY=200, maxY=3800;
+  bool swapXY=true;
+  bool invX=false;
+  bool invY=false;
+  bool valid=false;
+};
 CalData cal;
 
-// helpers
-static inline uint16_t umin4(uint16_t a,uint16_t b,uint16_t c,uint16_t d){ return min(min(a,b),min(c,d)); }
-static inline uint16_t umax4(uint16_t a,uint16_t b,uint16_t c,uint16_t d){ return max(max(a,b),max(c,d)); }
+// ===================== UI State =====================
+enum Mode : uint8_t { MODE_DEMO=0, MODE_PAINT=1, MODE_INFO=2 };
+Mode mode = MODE_DEMO;
+
+bool calRequestFromWeb = false;
+bool calibrating = false;
+
+// ===================== Helpers =====================
+static inline int clampi(int v, int lo, int hi) { return (v<lo)?lo:(v>hi)?hi:v; }
+
+static inline uint16_t mapU16(int v, int inMin, int inMax, int outMin, int outMax) {
+  v = clampi(v, inMin, inMax);
+  long num = (long)(v - inMin) * (outMax - outMin);
+  long den = (inMax - inMin);
+  return (uint16_t)(outMin + num / den);
+}
 
 void loadCal() {
   prefs.begin("touchcal", true);
   cal.valid = prefs.getBool("valid", false);
   if (cal.valid) {
-    cal.rawMinX = prefs.getUShort("minx", 200);
-    cal.rawMaxX = prefs.getUShort("maxx", 3800);
-    cal.rawMinY = prefs.getUShort("miny", 200);
-    cal.rawMaxY = prefs.getUShort("maxy", 3800);
-    cal.swapXY  = prefs.getBool("swap", true);
-    cal.invX    = prefs.getBool("invx", true);
-    cal.invY    = prefs.getBool("invy", false);
+    cal.minX   = prefs.getUShort("minX", 200);
+    cal.maxX   = prefs.getUShort("maxX", 3800);
+    cal.minY   = prefs.getUShort("minY", 200);
+    cal.maxY   = prefs.getUShort("maxY", 3800);
+    cal.swapXY = prefs.getBool("swap", true);
+    cal.invX   = prefs.getBool("invX", false);
+    cal.invY   = prefs.getBool("invY", false);
   }
   prefs.end();
 }
@@ -139,13 +74,13 @@ void loadCal() {
 void saveCal() {
   prefs.begin("touchcal", false);
   prefs.putBool("valid", true);
-  prefs.putUShort("minx", cal.rawMinX);
-  prefs.putUShort("maxx", cal.rawMaxX);
-  prefs.putUShort("miny", cal.rawMinY);
-  prefs.putUShort("maxy", cal.rawMaxY);
-  prefs.putBool("swap",  cal.swapXY);
-  prefs.putBool("invx",  cal.invX);
-  prefs.putBool("invy",  cal.invY);
+  prefs.putUShort("minX", cal.minX);
+  prefs.putUShort("maxX", cal.maxX);
+  prefs.putUShort("minY", cal.minY);
+  prefs.putUShort("maxY", cal.maxY);
+  prefs.putBool("swap", cal.swapXY);
+  prefs.putBool("invX", cal.invX);
+  prefs.putBool("invY", cal.invY);
   prefs.end();
   cal.valid = true;
 }
@@ -158,255 +93,23 @@ void resetCal() {
   cal.valid = false;
 }
 
-// Map raw -> screen (uses cal)
-static inline int clampi(int v,int lo,int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
-
-static inline uint16_t mapU16(int v, int inMin, int inMax, int outMin, int outMax) {
-  v = clampi(v, inMin, inMax);
-  long num = (long)(v - inMin) * (outMax - outMin);
-  long den = (inMax - inMin);
-  return (uint16_t)(outMin + num / den);
-}
-
-bool mapTouchToScreen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy) {
-  if (!cal.valid) return false;
-
-  uint16_t ax = cal.swapXY ? ry : rx; // screen X raw source
-  uint16_t ay = cal.swapXY ? rx : ry; // screen Y raw source
-
-  // map
-  uint16_t mx = mapU16(ax, cal.rawMinX, cal.rawMaxX, 0, 319);
-  uint16_t my = mapU16(ay, cal.rawMinY, cal.rawMaxY, 0, 479);
-
-  if (cal.invX) mx = 319 - mx;
-  if (cal.invY) my = 479 - my;
-
-  sx = mx;
-  sy = my;
-  return true;
-}
-
-// ===================== UI =====================
-bool calibrating = false;
-
-void drawHome() {
-  lcd.fillScreen(TFT_BLACK);
-  lcd.setTextSize(2);
-  lcd.setTextColor(TFT_WHITE);
-  lcd.setCursor(10, 10);
-  lcd.println("ESP32 TFT + OTA + CAL");
-
-  lcd.setTextColor(TFT_CYAN);
-  lcd.setCursor(10, 40);
-  lcd.print("OTA: http://192.168.4.1/update");
-
-  lcd.setCursor(10, 70);
-  lcd.print("CAL: http://192.168.4.1/cal");
-
-  lcd.setTextColor(TFT_YELLOW);
-  lcd.setCursor(10, 110);
-  lcd.print("Touch: ");
-  lcd.println(cal.valid ? "CAL OK" : "NOT CAL");
-
-  lcd.setTextColor(TFT_GREEN);
-  lcd.setCursor(10, 150);
-  lcd.println("Tippe zum Malen (wenn CAL OK)");
-
-  // kleine Legende
-  lcd.setTextColor(TFT_DARKGREY);
-  lcd.setCursor(10, 450);
-  lcd.println("Web: /cal -> Start Calibration");
-}
-
-void drawCalParams() {
-  lcd.fillRect(0, 180, 320, 240, TFT_BLACK);
-  lcd.setTextColor(TFT_WHITE);
-  lcd.setTextSize(2);
-  lcd.setCursor(10, 180);
-  lcd.printf("swapXY: %s\n", cal.swapXY ? "true" : "false");
-  lcd.setCursor(10, 205);
-  lcd.printf("invX:   %s\n", cal.invX ? "true" : "false");
-  lcd.setCursor(10, 230);
-  lcd.printf("invY:   %s\n", cal.invY ? "true" : "false");
-  lcd.setCursor(10, 255);
-  lcd.printf("minX:%u maxX:%u\n", cal.rawMinX, cal.rawMaxX);
-  lcd.setCursor(10, 280);
-  lcd.printf("minY:%u maxY:%u\n", cal.rawMinY, cal.rawMaxY);
-}
-
-bool waitForStableRaw(uint16_t &rx, uint16_t &ry) {
-  uint32_t t0 = millis();
-  while (millis() - t0 < 15000) { // 15s timeout
-    uint16_t a,b;
-    if (xpt2046_readXY(a,b)) {
-      // einfache "Stabilität": gleiche Stelle 3x
-      uint16_t a2,b2,a3,b3;
-      delay(30);
-      if (!xpt2046_readXY(a2,b2)) continue;
-      delay(30);
-      if (!xpt2046_readXY(a3,b3)) continue;
-
-      auto d = [](uint16_t p, uint16_t q){ return (p>q)?(p-q):(q-p); };
-      if (d(a,a2)<80 && d(a2,a3)<80 && d(b,b2)<80 && d(b2,b3)<80) {
-        rx = (a+a2+a3)/3;
-        ry = (b+b2+b3)/3;
-        // warten bis losgelassen (damit nächster Punkt nicht sofort feuert)
-        uint32_t rel = millis();
-        while (millis() - rel < 800) {
-          uint16_t tmpx,tmpy;
-          if (!xpt2046_readXY(tmpx,tmpy)) break;
-          delay(20);
-        }
-        return true;
-      }
-    }
-    delay(10);
-  }
-  return false;
-}
-
-void startCalibration() {
-  calibrating = true;
-
-  lcd.fillScreen(TFT_BLACK);
-  lcd.setTextSize(2);
-  lcd.setTextColor(TFT_WHITE);
-  lcd.setCursor(10, 10);
-  lcd.println("CALIBRATION");
-  lcd.setCursor(10, 40);
-  lcd.println("Tippe 4 Punkte:");
-
-  struct P { uint16_t rx, ry; } tl{}, tr{}, br{}, bl{};
-
-  // Zielpunkte (Screen)
-  auto ask = [&](const char* label, int sx, int sy, P &out){
-    lcd.fillRect(0, 80, 320, 60, TFT_BLACK);
-    lcd.setCursor(10, 80);
-    lcd.setTextColor(TFT_YELLOW);
-    lcd.printf("Tippe: %s", label);
-
-    // Marker zeichnen
-    lcd.fillRect(0, 140, 320, 340, TFT_BLACK);
-    lcd.drawCircle(sx, sy, 12, TFT_GREEN);
-    lcd.drawCircle(sx, sy, 2, TFT_GREEN);
-
-    uint16_t rx, ry;
-    if (!waitForStableRaw(rx, ry)) {
-      lcd.fillRect(0, 420, 320, 60, TFT_BLACK);
-      lcd.setCursor(10, 430);
-      lcd.setTextColor(TFT_RED);
-      lcd.println("Timeout / kein Touch");
-      delay(1200);
-      calibrating = false;
-      drawHome();
-      return;
-    }
-    out.rx = rx; out.ry = ry;
-
-    lcd.setCursor(10, 110);
-    lcd.setTextColor(TFT_CYAN);
-    lcd.printf("RAW: x=%u y=%u   ", rx, ry);
-  };
-
-  ask("TOP-LEFT",     20,  70, tl);
-  ask("TOP-RIGHT",   300,  70, tr);
-  ask("BOTTOM-RIGHT",300, 460, br);
-  ask("BOTTOM-LEFT",  20, 460, bl);
-
-  // === Auto-Analyse: Swap + Invert + Min/Max ===
-  auto ad = [](uint16_t a, uint16_t b){ return (a>b)?(a-b):(b-a); };
-
-  // Welche RAW-Achse korreliert mit Screen-X? (TL->TR)
-  uint16_t dx_rx = ad(tr.rx, tl.rx);
-  uint16_t dx_ry = ad(tr.ry, tl.ry);
-  cal.swapXY = (dx_ry > dx_rx); // wenn ry stärker auf X reagiert => swap
-
-  // Wähle "rawX/rawY" gemäß swap
-  auto rawX = [&](const P& p)->uint16_t { return cal.swapXY ? p.ry : p.rx; };
-  auto rawY = [&](const P& p)->uint16_t { return cal.swapXY ? p.rx : p.ry; };
-
-  // Invert X? (TL->TR muss rawX steigen, sonst invert)
-  cal.invX = !(rawX(tr) > rawX(tl));
-
-  // Invert Y? (TL->BL muss rawY steigen, sonst invert)
-  cal.invY = !(rawY(bl) > rawY(tl));
-
-  // Min/Max aus 4 Ecken
-  uint16_t rxtl = rawX(tl), rxtr = rawX(tr), rxbr = rawX(br), rxbl = rawX(bl);
-  uint16_t rytl = rawY(tl), rytr = rawY(tr), rybr = rawY(br), rybl = rawY(bl);
-
-  cal.rawMinX = umin4(rxtl, rxtr, rxbr, rxbl);
-  cal.rawMaxX = umax4(rxtl, rxtr, rxbr, rxbl);
-  cal.rawMinY = umin4(rytl, rytr, rybr, rybl);
-  cal.rawMaxY = umax4(rytl, rytr, rybr, rybl);
-
-  // kleiner Sicherheitsrand (damit Rand erreichbar bleibt)
-  auto expand = [](uint16_t &mn, uint16_t &mx){
-    uint16_t span = (mx > mn) ? (mx - mn) : 0;
-    uint16_t pad  = max<uint16_t>(30, span / 25); // ~4%
-    mn = (mn > pad) ? (mn - pad) : 0;
-    mx = (mx + pad < 4095) ? (mx + pad) : 4095;
-  };
-  expand(cal.rawMinX, cal.rawMaxX);
-  expand(cal.rawMinY, cal.rawMaxY);
-
-  saveCal();
-
-  // Ergebnis anzeigen
-  lcd.fillScreen(TFT_BLACK);
-  lcd.setTextColor(TFT_GREEN);
-  lcd.setTextSize(2);
-  lcd.setCursor(10, 10);
-  lcd.println("CAL SAVED");
-  drawCalParams();
-
-  lcd.setTextColor(TFT_YELLOW);
-  lcd.setCursor(10, 420);
-  lcd.println("Teste: Tippe/Malen");
-  delay(1500);
-
-  calibrating = false;
-  drawHome();
-  drawCalParams();
-}
-
-void handleTouchPaint() {
-  if (calibrating) return;
-
-  uint16_t rx, ry;
-  if (!xpt2046_readXY(rx, ry)) return;
-
-  uint16_t sx, sy;
-  if (!mapTouchToScreen(rx, ry, sx, sy)) return;
-
-  // Malen
-  lcd.fillCircle(sx, sy, 6, TFT_RED);
-
-  // Statuszeile
-  lcd.fillRect(0, 430, 320, 50, TFT_BLACK);
-  lcd.setTextColor(TFT_WHITE);
-  lcd.setTextSize(2);
-  lcd.setCursor(10, 440);
-  lcd.printf("x=%u y=%u", sx, sy);
-}
-
-// ===================== Web UI =====================
+// ===================== Web OTA + Cal Menu =====================
 String calJson() {
-  String s = "{";
-  s += "\"valid\":" + String(cal.valid ? "true" : "false");
-  s += ",\"swapXY\":" + String(cal.swapXY ? "true" : "false");
-  s += ",\"invX\":" + String(cal.invX ? "true" : "false");
-  s += ",\"invY\":" + String(cal.invY ? "true" : "false");
-  s += ",\"minX\":" + String(cal.rawMinX);
-  s += ",\"maxX\":" + String(cal.rawMaxX);
-  s += ",\"minY\":" + String(cal.rawMinY);
-  s += ",\"maxY\":" + String(cal.rawMaxY);
-  s += ",\"calibrating\":" + String(calibrating ? "true" : "false");
+  String s="{";
+  s += "\"valid\":" + String(cal.valid?"true":"false");
+  s += ",\"swapXY\":" + String(cal.swapXY?"true":"false");
+  s += ",\"invX\":" + String(cal.invX?"true":"false");
+  s += ",\"invY\":" + String(cal.invY?"true":"false");
+  s += ",\"minX\":" + String(cal.minX);
+  s += ",\"maxX\":" + String(cal.maxX);
+  s += ",\"minY\":" + String(cal.minY);
+  s += ",\"maxY\":" + String(cal.maxY);
+  s += ",\"calibrating\":" + String(calibrating?"true":"false");
   s += "}";
   return s;
 }
 
-const char CAL_HTML[] PROGMEM = R"HTML(
+static const char CAL_HTML[] PROGMEM = R"HTML(
 <!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Touch Calibration</title>
@@ -417,7 +120,7 @@ pre{background:#111;color:#0f0;padding:10px;overflow:auto;}
 </style>
 </head><body>
 <h2>Touch Calibration</h2>
-<p>Kalibrierung passiert am TFT (nicht im Browser). Hier kannst du starten und Werte ansehen.</p>
+<p>Kalibrierung passiert am TFT. Hier starten und Werte ansehen.</p>
 <p>
 <button onclick="fetch('/api/start_cal').then(r=>r.text()).then(alert)">Start Calibration (TFT)</button><br>
 <button onclick="fetch('/api/reset_cal').then(r=>r.text()).then(alert)">Reset Calibration</button>
@@ -436,12 +139,12 @@ setInterval(refresh, 1000); refresh();
 )HTML";
 
 void setupWeb() {
-  // root
   server.on("/", HTTP_GET, [](){
-    server.send(200, "text/plain", "OK. Open /update for OTA or /cal for calibration menu.");
+    server.send(200, "text/plain",
+      "OK. Open /update for OTA or /cal for calibration menu.");
   });
 
-  // OTA pages
+  // OTA page
   server.on("/update", HTTP_GET, [](){
     server.send(200, "text/html",
       "<!doctype html><html><body><h2>OTA Update</h2>"
@@ -451,6 +154,7 @@ void setupWeb() {
     );
   });
 
+  // OTA upload
   server.on("/update", HTTP_POST,
     [](){
       server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK. Reboot...");
@@ -467,80 +171,353 @@ void setupWeb() {
   );
 
   // Calibration menu
-  server.on("/cal", HTTP_GET, [](){
-    server.send_P(200, "text/html", CAL_HTML);
-  });
-
-  server.on("/api/cal", HTTP_GET, [](){
-    server.send(200, "application/json", calJson());
-  });
-
+  server.on("/cal", HTTP_GET, [](){ server.send_P(200, "text/html", CAL_HTML); });
+  server.on("/api/cal", HTTP_GET, [](){ server.send(200, "application/json", calJson()); });
   server.on("/api/start_cal", HTTP_GET, [](){
-    if (!calibrating) {
-      // nicht im Handler blockieren -> Flag setzen, Start im loop()
-      calibrating = true;
-      server.send(200, "text/plain", "OK: Calibration will start on TFT now.");
-    } else {
-      server.send(200, "text/plain", "Already calibrating.");
-    }
+    calRequestFromWeb = true;
+    server.send(200, "text/plain", "OK: Calibration will start on TFT.");
   });
-
   server.on("/api/reset_cal", HTTP_GET, [](){
     resetCal();
     server.send(200, "text/plain", "Calibration reset.");
-    drawHome();
-    drawCalParams();
   });
 
   server.begin();
+}
+
+// ===================== Touch read (IRQ) =====================
+bool touchRaw(uint16_t &rx, uint16_t &ry) {
+  // IRQ active-low; HIGH = nix gedrückt
+  if (digitalRead(TOUCH_IRQ) == HIGH) return false;
+  if (!ts.touched()) return false;
+  TS_Point p = ts.getPoint(); // raw
+  rx = (uint16_t)p.x;
+  ry = (uint16_t)p.y;
+  return true;
+}
+
+bool mapToScreen(uint16_t rx, uint16_t ry, uint16_t &sx, uint16_t &sy) {
+  if (!cal.valid) return false;
+
+  uint16_t ax = cal.swapXY ? ry : rx;
+  uint16_t ay = cal.swapXY ? rx : ry;
+
+  uint16_t x = mapU16(ax, cal.minX, cal.maxX, 0, 319);
+  uint16_t y = mapU16(ay, cal.minY, cal.maxY, 0, 479);
+
+  if (cal.invX) x = 319 - x;
+  if (cal.invY) y = 479 - y;
+
+  sx = x; sy = y;
+  return true;
+}
+
+// ===================== UI Drawing =====================
+void drawStatus(const String& s) {
+  tft.fillRect(0, 430, 320, 50, TFT_BLACK);
+  tft.drawFastHLine(0, 430, 320, TFT_DARKGREY);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(10, 445);
+  tft.print(s);
+}
+
+void drawTopBar() {
+  tft.fillRect(0, 0, 320, 60, TFT_DARKGREY);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  tft.setCursor(10, 10);
+  tft.print("ESP32 TFT + OTA");
+
+  // Tabs
+  tft.setCursor(10, 35);  tft.print("DEMO");
+  tft.setCursor(120,35);  tft.print("PAINT");
+  tft.setCursor(240,35);  tft.print("INFO");
+
+  int x = (mode==MODE_DEMO)?10 : (mode==MODE_PAINT)?120 : 240;
+  tft.drawRect(x-4, 32, 80, 24, TFT_GREEN);
+}
+
+void renderScreen() {
+  tft.fillScreen(TFT_BLACK);
+  drawTopBar();
+
+  tft.fillRect(0, 60, 320, 370, TFT_BLACK);
+
+  if (mode == MODE_DEMO) {
+    // „sieht nach was aus“
+    for (int y = 60; y < 360; y += 8) {
+      uint16_t c = tft.color565((y*2)&255, (y*3)&255, (y*5)&255);
+      tft.fillRect(0, y, 320, 8, c);
+    }
+    tft.drawRoundRect(10, 80, 140, 70, 12, TFT_BLACK);
+    tft.fillCircle(250, 140, 30, TFT_WHITE);
+    tft.drawTriangle(200, 290, 300, 290, 250, 220, TFT_BLACK);
+    drawStatus(String("DEMO  |  Touch: ") + (cal.valid ? "OK" : "NOT CAL"));
+
+  } else if (mode == MODE_PAINT) {
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 70);
+    tft.print("Paint (wipe)");
+    tft.drawRect(5, 110, 310, 310, TFT_DARKGREY);
+    drawStatus("PAINT");
+
+  } else {
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 70);
+    tft.print("INFO");
+    tft.setCursor(10, 100);
+    tft.print("AP: "); tft.println(AP_SSID);
+    tft.setCursor(10, 130);
+    tft.print("IP: "); tft.println(WiFi.softAPIP());
+    tft.setCursor(10, 160);
+    tft.print("OTA: /update");
+    tft.setCursor(10, 190);
+    tft.print("CAL: /cal");
+    drawStatus(String("Touch: ") + (cal.valid ? "CAL OK" : "NOT CAL"));
+  }
+}
+
+// ===================== Calibration on TFT =====================
+void drawCross(int x, int y, uint16_t col) {
+  tft.drawLine(x-12,y, x+12,y, col);
+  tft.drawLine(x,y-12, x,y+12, col);
+  tft.drawCircle(x,y, 14, col);
+}
+
+bool waitStableTouch(uint16_t &rx, uint16_t &ry) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < 15000) {
+    uint16_t a,b;
+    if (touchRaw(a,b)) {
+      delay(30);
+      uint16_t a2,b2; if (!touchRaw(a2,b2)) continue;
+      delay(30);
+      uint16_t a3,b3; if (!touchRaw(a3,b3)) continue;
+
+      auto d=[](uint16_t p,uint16_t q){ return (p>q)?(p-q):(q-p); };
+      if (d(a,a2)<80 && d(a2,a3)<80 && d(b,b2)<80 && d(b2,b3)<80) {
+        rx=(a+a2+a3)/3; ry=(b+b2+b3)/3;
+
+        // warten bis losgelassen
+        uint32_t rel=millis();
+        while (millis() - rel < 800) {
+          uint16_t tx,ty;
+          if (!touchRaw(tx,ty)) break;
+          delay(20);
+        }
+        return true;
+      }
+    }
+    delay(10);
+  }
+  return false;
+}
+
+void doCalibration() {
+  calibrating = true;
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 10);
+  tft.println("TOUCH CALIBRATION");
+  tft.setCursor(10, 40);
+  tft.println("Tippe 4 Ecken");
+
+  struct P { uint16_t rx, ry; } TL{}, TR{}, BR{}, BL{};
+
+  auto ask = [&](const char* label, int sx, int sy, P &out)->bool{
+    tft.fillRect(0, 80, 320, 60, TFT_BLACK);
+    tft.setCursor(10, 80);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.print("Tippe: "); tft.print(label);
+
+    tft.fillRect(0, 150, 320, 330, TFT_BLACK);
+    drawCross(sx, sy, TFT_GREEN);
+
+    uint16_t rx, ry;
+    if (!waitStableTouch(rx, ry)) return false;
+    out.rx=rx; out.ry=ry;
+
+    tft.setCursor(10, 110);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.printf("RAW x=%u y=%u   ", rx, ry);
+    return true;
+  };
+
+  // Zielpunkte (unter Topbar)
+  const int TLx=20,  TLy=80;
+  const int TRx=300, TRy=80;
+  const int BRx=300, BRy=460;
+  const int BLx=20,  BLy=460;
+
+  if (!ask("TOP-LEFT", TLx, TLy, TL)) { drawStatus("CAL FAIL"); calibrating=false; return; }
+  if (!ask("TOP-RIGHT",TRx, TRy, TR)) { drawStatus("CAL FAIL"); calibrating=false; return; }
+  if (!ask("BOTTOM-RIGHT",BRx, BRy, BR)) { drawStatus("CAL FAIL"); calibrating=false; return; }
+  if (!ask("BOTTOM-LEFT",BLx, BLy, BL)) { drawStatus("CAL FAIL"); calibrating=false; return; }
+
+  auto ad=[](uint16_t a,uint16_t b){ return (a>b)?(a-b):(b-a); };
+
+  // Swap bestimmen (welche RAW-Achse reagiert auf X?)
+  uint16_t dx_rx = ad(TR.rx, TL.rx);
+  uint16_t dx_ry = ad(TR.ry, TL.ry);
+  cal.swapXY = (dx_ry > dx_rx);
+
+  auto rawX = [&](const P& p)->uint16_t { return cal.swapXY ? p.ry : p.rx; };
+  auto rawY = [&](const P& p)->uint16_t { return cal.swapXY ? p.rx : p.ry; };
+
+  // invert bestimmen
+  cal.invX = !(rawX(TR) > rawX(TL));
+  cal.invY = !(rawY(BL) > rawY(TL));
+
+  // min/max
+  uint16_t x1=rawX(TL), x2=rawX(TR), x3=rawX(BR), x4=rawX(BL);
+  uint16_t y1=rawY(TL), y2=rawY(TR), y3=rawY(BR), y4=rawY(BL);
+
+  cal.minX = min(min(x1,x2), min(x3,x4));
+  cal.maxX = max(max(x1,x2), max(x3,x4));
+  cal.minY = min(min(y1,y2), min(y3,y4));
+  cal.maxY = max(max(y1,y2), max(y3,y4));
+
+  // padding
+  auto expand=[](uint16_t &mn, uint16_t &mx){
+    uint16_t span = (mx>mn)?(mx-mn):0;
+    uint16_t pad  = max<uint16_t>(30, span/25);
+    mn = (mn>pad)?(mn-pad):0;
+    mx = (mx+pad<4095)?(mx+pad):4095;
+  };
+  expand(cal.minX, cal.maxX);
+  expand(cal.minY, cal.maxY);
+
+  saveCal();
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 10);
+  tft.println("CAL SAVED");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 50);
+  tft.printf("swapXY=%d invX=%d invY=%d\n", cal.swapXY, cal.invX, cal.invY);
+  tft.setCursor(10, 80);
+  tft.printf("minX=%u maxX=%u\n", cal.minX, cal.maxX);
+  tft.setCursor(10, 110);
+  tft.printf("minY=%u maxY=%u\n", cal.minY, cal.maxY);
+
+  delay(1200);
+  calibrating = false;
+  renderScreen();
+}
+
+// ===================== Interaction + Demo Anim =====================
+uint32_t lastTouchMs = 0;
+int bx=40, by=220, vx=3, vy=2;
+uint32_t lastAnim=0;
+
+void handleTouch() {
+  if (calibrating) return;
+
+  uint16_t rx, ry;
+  if (!touchRaw(rx, ry)) return;
+
+  uint32_t now = millis();
+  if (now - lastTouchMs < 25) return;
+  lastTouchMs = now;
+
+  uint16_t sx, sy;
+  bool ok = mapToScreen(rx, ry, sx, sy);
+
+  // Tabs in topbar (y 30..60 ungefähr)
+  if (ok && sy >= 30 && sy < 60) {
+    if (sx < 106) mode = MODE_DEMO;
+    else if (sx < 213) mode = MODE_PAINT;
+    else mode = MODE_INFO;
+    renderScreen();
+    return;
+  }
+
+  if (!ok) {
+    drawStatus("Touch NOT CAL -> /cal");
+    return;
+  }
+
+  if (mode == MODE_PAINT) {
+    // paint box
+    if (sx >= 5 && sx <= 315 && sy >= 110 && sy <= 420) {
+      tft.fillCircle(sx, sy, 6, TFT_RED);
+      drawStatus("PAINT");
+    }
+    return;
+  }
+
+  if (mode == MODE_INFO) {
+    drawStatus("RAW->XY OK");
+    tft.fillCircle(sx, sy, 6, TFT_CYAN);
+    return;
+  }
+
+  if (mode == MODE_DEMO) {
+    tft.fillCircle(sx, sy, 6, TFT_BLACK); // “radierer” in demo
+  }
+}
+
+void demoTick() {
+  if (mode != MODE_DEMO) return;
+  uint32_t now = millis();
+  if (now - lastAnim < 16) return;
+  lastAnim = now;
+
+  // bounce ball in demo area (60..430)
+  tft.fillCircle(bx, by, 10, TFT_WHITE); // old ball “hinterlässt” kleine spur -> sieht lebendig aus
+  tft.fillCircle(bx, by, 9, TFT_BLACK);
+
+  bx += vx; by += vy;
+  if (bx < 15 || bx > 305) vx = -vx;
+  if (by < 75 || by > 415) vy = -vy;
+
+  tft.fillCircle(bx, by, 10, TFT_WHITE);
 }
 
 // ===================== Setup / Loop =====================
 void setup() {
   Serial.begin(115200);
 
-  // Backlight
   pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH); // falls dunkel: LOW testen
+  digitalWrite(TFT_BL, HIGH);
 
-  // TFT
-  lcd.init();
-  lcd.setRotation(1);
+  // Shared SPI
+  spi.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
 
-  // Touch SPI
-  pinMode(TOUCH_CS, OUTPUT);
-  digitalWrite(TOUCH_CS, HIGH);
-  vspi.begin(TFT_SCK, TFT_MISO, TFT_MOSI, -1);
+  // Display
+  tft.init();
+  tft.setRotation(1);
+
+  // Touch
+  pinMode(TOUCH_IRQ, INPUT_PULLUP);
+  ts.begin(spi);
 
   loadCal();
 
-  // AP
+  // AP + Web
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(100);
-
   setupWeb();
-  drawHome();
-  if (cal.valid) drawCalParams();
+
+  renderScreen();
 }
 
 void loop() {
   server.handleClient();
 
-  // Start calibration if requested from web
-  if (calibrating) {
-    // calibrating flag is used as trigger; startCalibration() will clear it on exit
-    // But we need a separate internal "started" to avoid re-enter.
-    static bool started = false;
-    if (!started) {
-      started = true;
-      startCalibration();
-      started = false;
-      calibrating = false;
-    }
-    return;
+  if (calRequestFromWeb) {
+    calRequestFromWeb = false;
+    doCalibration();
   }
 
-  // normal paint
-  handleTouchPaint();
+  handleTouch();
+  demoTick();
 }
