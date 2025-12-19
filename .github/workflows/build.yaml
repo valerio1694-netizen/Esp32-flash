@@ -46,8 +46,19 @@ jobs:
           #define SPI_FREQUENCY  27000000
           EOF
 
-      - name: Compile firmware
+      - name: Compile firmware (export binaries)
         run: |
+          mkdir -p build
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
+            --export-binaries \
+            --output-dir build \
             firmware/panel
+          echo "==== build output ===="
+          ls -lah build
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/**
