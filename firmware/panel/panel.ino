@@ -40,10 +40,10 @@ void handleUpdate() {
 
   if (upload.status == UPLOAD_FILE_START) {
     Update.begin(UPDATE_SIZE_UNKNOWN);
-  } 
+  }
   else if (upload.status == UPLOAD_FILE_WRITE) {
     Update.write(upload.buf, upload.currentSize);
-  } 
+  }
   else if (upload.status == UPLOAD_FILE_END) {
     if (Update.end(true)) {
       server.send(200, "text/plain", "Update OK. Rebooting...");
@@ -58,9 +58,6 @@ void handleUpdate() {
 void setup() {
   Serial.begin(115200);
 
-  // =====================
-  // TFT INIT
-  // =====================
   tft.init();
   tft.setRotation(1); // Landscape
   tft.fillScreen(TFT_BLACK);
@@ -69,12 +66,9 @@ void setup() {
   tft.setTextSize(2);
   tft.setCursor(20, 20);
   tft.println("ESP32 TFT OK");
-  tft.println("ST7796S");
+  tft.println("ST7796");
   tft.println("Web OTA aktiv");
 
-  // =====================
-  // WIFI AP
-  // =====================
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_pass);
 
@@ -82,9 +76,6 @@ void setup() {
   Serial.print("AP IP: ");
   Serial.println(ip);
 
-  // =====================
-  // WEB
-  // =====================
   server.on("/", HTTP_GET, handleRoot);
   server.on("/update", HTTP_POST, []() {
     server.send(200);
