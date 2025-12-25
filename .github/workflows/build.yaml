@@ -20,42 +20,38 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.5
+          arduino-cli core install esp32:esp32
 
-      - name: Install libraries
+      - name: Install TFT_eSPI
         run: |
           arduino-cli lib update-index
           arduino-cli lib install TFT_eSPI
 
-      - name: Patch TFT_eSPI User_Setup.h (ST7796)
+      - name: Patch TFT_eSPI User_Setup.h (ST7796S)
         run: |
-          TFT_DIR="$HOME/Arduino/libraries/TFT_eSPI"
-          cat > "$TFT_DIR/User_Setup.h" <<'EOF'
-          #define ST7796_DRIVER
+          TFT="$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
+          cat > $TFT << 'EOF'
+          #define ST7796S_DRIVER
 
           #define TFT_WIDTH  320
           #define TFT_HEIGHT 480
 
-          #define TFT_MISO 19
           #define TFT_MOSI 23
+          #define TFT_MISO 19
           #define TFT_SCLK 18
           #define TFT_CS    5
           #define TFT_DC   21
           #define TFT_RST  22
 
           #define TFT_RGB_ORDER TFT_BGR
-          #define SPI_FREQUENCY  27000000
+          #define TFT_INVERSION_ON
+          #define TFT_MADCTL 0x48
+
+          #define SPI_FREQUENCY 27000000
           EOF
 
       - name: Compile firmware
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
-            --output-dir build \
             firmware/panel
-
-      - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-bin
-          path: build/**/*.bin
