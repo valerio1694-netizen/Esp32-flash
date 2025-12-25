@@ -38,7 +38,7 @@ void setup() {
 
   // --- TFT ---
   tft.init();
-  tft.setRotation(1);     // Querformat 480x320
+  tft.setRotation(3);     // Querformat 480x320
   tft.fillScreen(TFT_BLACK);
 
   // Farbtest (GANZE FLÄCHE!)
