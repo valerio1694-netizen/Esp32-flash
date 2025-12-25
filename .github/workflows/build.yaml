@@ -46,3 +46,16 @@ jobs:
           #define TFT_RGB_ORDER TFT_BGR
           #define SPI_FREQUENCY  13000000
           EOF
+
+      - name: Compile firmware
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir firmware/panel/build \
+            firmware/panel
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: firmware/panel/build/**
