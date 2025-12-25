@@ -26,6 +26,8 @@ jobs:
         run: |
           arduino-cli lib update-index
           arduino-cli lib install TFT_eSPI
+          arduino-cli lib update-index
+          arduino-cli lib install XPT2046_Touchscreen
 
       - name: Patch TFT_eSPI User_Setup.h (ST7796)
         run: |
