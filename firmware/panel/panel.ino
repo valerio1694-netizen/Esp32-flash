@@ -95,6 +95,7 @@ void setup() {
   // TFT
   tft.init();
   tft.setRotation(1); // Querformat 480x320 bei ST7796-480x320 Panels
+  tft.setAddrWindow(0, 0, 480, 320);
   drawDisplayTest();
 
   // Web / OTA
