@@ -38,14 +38,17 @@ void setup() {
 
   // --- TFT ---
   tft.init();
-  tft.setRotation(3);     // Querformat 480x320
+  tft.setRotation(1);     // Querformat 480x320
   tft.fillScreen(TFT_BLACK);
 
   // Farbtest (GANZE FLÄCHE!)
-  tft.fillRect(0,   0, 96, 320, TFT_RED);
-  tft.fillRect(96,  0, 96, 320, TFT_GREEN);
-  tft.fillRect(192, 0, 96, 320, TFT_BLUE);
-  tft.fillRect(288, 0, 96, 320, TFT_YELLOW);
+int w = tft.width() / 5;
+int h = tft.height();
+tft.fillRect(0*w, 0, w, h, TFT_RED);
+tft.fillRect(1*w, 0, w, h, TFT_GREEN);
+tft.fillRect(2*w, 0, w, h, TFT_BLUE);
+tft.fillRect(3*w, 0, w, h, TFT_YELLOW);
+tft.fillRect(4*w, 0, w, h, TFT_MAGENTA);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(2);
