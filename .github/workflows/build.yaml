@@ -20,14 +20,14 @@ jobs:
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core install esp32:esp32@3.3.5
 
       - name: Install libraries
         run: |
           arduino-cli lib update-index
           arduino-cli lib install TFT_eSPI
 
-      - name: Patch TFT_eSPI User_Setup.h (ST7796, slow SPI)
+      - name: Patch TFT_eSPI User_Setup.h (ST7796)
         run: |
           TFT="$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
           cat > "$TFT" << 'EOF'
@@ -44,23 +44,5 @@ jobs:
           #define TFT_RST  22
 
           #define TFT_RGB_ORDER TFT_BGR
-
-          // Stabilität zuerst: langsam
-          #define TFT_SPI_MODE 0
-          #define SPI_FREQUENCY 13000000
+          #define SPI_FREQUENCY  13000000
           EOF
-
-      - name: Compile firmware
-        run: |
-          mkdir -p build
-          arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
-            --output-dir build \
-            firmware/panel
-          find build -maxdepth 2 -type f -print
-
-      - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-bin
-          path: build/**
