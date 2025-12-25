@@ -1,74 +1,95 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <TFT_eSPI.h>
 
-#include <TFT_eSPI.h>   // benutzt User_Setup.h
+// =====================
+// WIFI AP
+// =====================
+const char* ap_ssid = "ESP32-OTA";
+const char* ap_pass = "12345678";
 
-/* =========================
-   WLAN / OTA (Web-OTA)
-   ========================= */
-const char* ssid     = "DEIN_WLAN";
-const char* password = "DEIN_PASSWORT";
-
+// =====================
+// SERVER
+// =====================
 WebServer server(80);
+
+// =====================
+// TFT
+// =====================
 TFT_eSPI tft = TFT_eSPI();
 
-/* =========================
-   OTA Handler
-   ========================= */
+// =====================
+// OTA PAGE
+// =====================
+const char* uploadPage =
+"<html><body>"
+"<h2>ESP32 Web OTA</h2>"
+"<form method='POST' action='/update' enctype='multipart/form-data'>"
+"<input type='file' name='update'>"
+"<input type='submit' value='Update'>"
+"</form>"
+"</body></html>";
+
 void handleRoot() {
-  server.send(200, "text/html",
-    "<form method='POST' action='/update' enctype='multipart/form-data'>"
-    "<input type='file' name='update'>"
-    "<input type='submit' value='Update'>"
-    "</form>");
+  server.send(200, "text/html", uploadPage);
 }
 
 void handleUpdate() {
   HTTPUpload& upload = server.upload();
+
   if (upload.status == UPLOAD_FILE_START) {
-    Update.begin();
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    Update.begin(UPDATE_SIZE_UNKNOWN);
+  } 
+  else if (upload.status == UPLOAD_FILE_WRITE) {
     Update.write(upload.buf, upload.currentSize);
-  } else if (upload.status == UPLOAD_FILE_END) {
-    Update.end(true);
+  } 
+  else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      server.send(200, "text/plain", "Update OK. Rebooting...");
+      delay(1000);
+      ESP.restart();
+    } else {
+      server.send(500, "text/plain", "Update FAILED");
+    }
   }
 }
 
 void setup() {
   Serial.begin(115200);
 
-  /* ===== TFT ===== */
+  // =====================
+  // TFT INIT
+  // =====================
   tft.init();
-  tft.setRotation(1);          // WICHTIG für dein Panel
+  tft.setRotation(1); // Landscape
   tft.fillScreen(TFT_BLACK);
 
-  // Testanzeige
-  tft.fillRect(0, 0, 320, 40, TFT_DARKCYAN);
-  tft.setTextColor(TFT_WHITE, TFT_DARKCYAN);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString("ST7796S OK", 160, 20, 4);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(20, 20);
+  tft.println("ESP32 TFT OK");
+  tft.println("ST7796S");
+  tft.println("Web OTA aktiv");
 
-  // Farbbalken
-  int w = 320 / 5;
-  tft.fillRect(0*w, 60, w, 420, TFT_RED);
-  tft.fillRect(1*w, 60, w, 420, TFT_GREEN);
-  tft.fillRect(2*w, 60, w, 420, TFT_BLUE);
-  tft.fillRect(3*w, 60, w, 420, TFT_YELLOW);
-  tft.fillRect(4*w, 60, w, 420, TFT_MAGENTA);
+  // =====================
+  // WIFI AP
+  // =====================
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_pass);
 
-  /* ===== WLAN ===== */
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-  }
+  IPAddress ip = WiFi.softAPIP();
+  Serial.print("AP IP: ");
+  Serial.println(ip);
 
-  /* ===== OTA Web ===== */
+  // =====================
+  // WEB
+  // =====================
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/update", HTTP_POST,
-    []() { server.sendHeader("Connection", "close"); server.send(200, "text/plain", "OK"); ESP.restart(); },
-    handleUpdate
-  );
+  server.on("/update", HTTP_POST, []() {
+    server.send(200);
+  }, handleUpdate);
+
   server.begin();
 }
 
