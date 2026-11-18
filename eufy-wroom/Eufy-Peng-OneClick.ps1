@@ -114,8 +114,10 @@ function Set-WlanProfile([string]$ssid,[string]$password) {
 }
 function Connect-WLAN([string]$ssid) {
     Log "WLAN-Wechsel angefordert: $ssid"
-    & netsh.exe wlan connect "name=$ssid" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Windows konnte nicht zu $ssid wechseln" }
+    $netshResult=(& netsh.exe wlan connect "name=$ssid" 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows konnte nicht zu $ssid wechseln. netsh: $netshResult"
+    }
 }
 function Get-HTTP([string]$url,[int]$seconds) {
     $end = (Get-Date).AddSeconds($seconds)
@@ -341,9 +343,13 @@ function Bootstrap {
     if (!$espPass -or $espPass.Length -lt 8 -or $espPass.Length -gt 63) {
         throw 'ESP-AP-Passwort im Windows-Profil nicht lesbar. Kein WLAN-Wechsel.'
     }
+    # Mandatory preflight: previous Windows netsh calls failed even when
+    # returning to Peng. Do not risk the VPN unless the same reconnect
+    # command used by the recovery task works while Peng is still active.
+    Log 'Sicherheitstest: netsh kann die bestehende Peng-Verbindung steuern.'
+    Connect-WLAN $HomeSSID
     # Downloads and checksum validation happen while Peng is still active.
     # WLAN profile changes happen only after the recovery task is armed.
-    # Pruefsummen und Downloads VOR dem WLAN-Wechsel.
     Download-Firmware
     if (Get-ScheduledTask -TaskName $TaskWorker -ErrorAction SilentlyContinue) {
         if ((Get-ScheduledTask -TaskName $TaskWorker).State -eq 'Running') {
