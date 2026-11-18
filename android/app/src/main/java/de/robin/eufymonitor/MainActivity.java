@@ -249,10 +249,7 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(47), 1f);
             p.setMargins(dp(2), 0, dp(2), 0);
             navigation.addView(b, p);
-            b.setOnClickListener(v -> {
-                openTab(choice);
-                if (mainScroll != null) mainScroll.scrollTo(0, 0);
-            });
+            b.setOnClickListener(v -> openTab(choice));
         }
         if (settingsButton != null)
             settingsButton.setTextColor(index == 3 ? GREEN : FG);
@@ -265,8 +262,8 @@ public class MainActivity extends Activity {
         };
         heading.setText(titles[index]);
         subtitle.setText(sub[index]);
-        renderContent();
         if (mainScroll != null) mainScroll.scrollTo(0, 0);
+        renderContent();
     }
 
     private void renderContent() {
