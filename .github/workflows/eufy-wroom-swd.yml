@@ -1,0 +1,91 @@
+name: Eufy ESP32-WROOM CMSIS-DAP TCP
+on:
+  push:
+    branches:
+      - feature/eufy-wroom-cmsis-dap
+    paths:
+      - ".github/workflows/eufy-wroom-swd.yml"
+      - "eufy-wroom/**"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-wroom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ESP-IDF 6.0.2
+        uses: espressif/install-esp-idf-action@v1
+        with:
+          version: "v6.0.2"
+      - name: Retrieve CMSIS-DAP TCP firmware
+        run: |
+          git clone --depth 1 https://github.com/bkuschak/cmsis_dap_tcp_esp32.git upstream
+          git -C upstream rev-parse HEAD | tee upstream-commit.txt
+      - name: Generate WROOM config and unique WLAN password
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          AP_PASSWORD="$(openssl rand -hex 16)"
+          printf 'SSID=Eufy-SWD-WROOM\nPASSWORD=%s\nIP=192.168.4.1\nCMSIS_DAP_TCP_PORT=4441\n' "$AP_PASSWORD" > dist/wifi-credentials.txt
+          cat > upstream/sdkconfig.board_eufy_wroom <<EOF
+          CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+          CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+          CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+          CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+          CONFIG_ESP_DAP_1_SWD_SUPPORTED=y
+          CONFIG_ESP_DAP_1_JTAG_SUPPORTED=n
+          CONFIG_ESP_DAP_1_NRESET_SUPPORTED=n
+          CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=18
+          CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=19
+          CONFIG_ESP_DAP_1_LED_NONE=y
+          CONFIG_ESP_DAP_1_TCP_PORT=4441
+          CONFIG_ESP_DAP_PRODUCT_ID="Eufy RoboVac SWD ESP32-WROOM"
+          CONFIG_ESP_DAP_IO_PORT_WRITE_CYCLES=16
+          CONFIG_ESP_DAP_DELAY_SLOW_CYCLES=7
+          CONFIG_ESP_UART_BRIDGE_1_ENABLED=y
+          CONFIG_ESP_UART_BRIDGE_1_TCP_PORT=4442
+          CONFIG_ESP_UART_BRIDGE_1_UART_NUM=1
+          CONFIG_ESP_UART_BRIDGE_1_REMAP_PINS=y
+          CONFIG_ESP_UART_BRIDGE_1_TXD_PIN=17
+          CONFIG_ESP_UART_BRIDGE_1_RXD_PIN=16
+          CONFIG_ESP_UART_BRIDGE_1_BAUD_RATE=115200
+          CONFIG_ESP_DAP_MANAGE_WIFI=y
+          CONFIG_ESP_DAP_WIFI_MODE_AP=y
+          CONFIG_ESP_DAP_SOFTAP_SSID="Eufy-SWD-WROOM"
+          CONFIG_ESP_DAP_SOFTAP_PASSWORD="$AP_PASSWORD"
+          CONFIG_COMPILER_OPTIMIZATION_PERF=y
+          EOF
+      - name: Configure and compile for original ESP32
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SDKCONFIG_DEFAULTS=sdkconfig.board_eufy_wroom
+          idf.py set-target esp32
+          idf.py build
+          grep -E 'CONFIG_IDF_TARGET=|CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=|CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=|CONFIG_ESP_UART_BRIDGE_1_TXD_PIN=|CONFIG_ESP_UART_BRIDGE_1_RXD_PIN=|CONFIG_ESP_DAP_WIFI_MODE_AP=' sdkconfig
+      - name: Package single-file flash image and component images
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp upstream/build/bootloader/bootloader.bin dist/bootloader.bin
+          cp upstream/build/partition_table/partition-table.bin dist/partition-table.bin
+          cp upstream/build/cmsis_dap_tcp_esp32.bin dist/firmware.bin
+          python -m esptool --chip esp32 merge-bin \
+            --flash-mode dio --flash-freq 40m --flash-size 4MB \
+            -o dist/Eufy-WROOM-SWD-full.bin \
+            0x1000 upstream/build/bootloader/bootloader.bin \
+            0x8000 upstream/build/partition_table/partition-table.bin \
+            0x10000 upstream/build/cmsis_dap_tcp_esp32.bin
+          cp upstream-commit.txt dist/upstream-commit.txt
+          sha256sum dist/*.bin > dist/SHA256SUMS
+          test -s dist/Eufy-WROOM-SWD-full.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Eufy-WROOM-CMSIS-DAP-TCP
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
