@@ -4,7 +4,11 @@
 # Keine Eingaben; KEINE Aenderung an der GD32-Firmware.
 # WARNUNG: Beim Wechsel zu Eufy-SWD-WROOM bricht der WireGuard-/Remotezugriff ab.
 # Eigenstaendige Task-Scheduler-Jobs arbeiten danach lokal weiter.
-param([ValidateSet('Start','Worker','Recovery')][string]$Mode='Start')
+param(
+    [ValidateSet('Start','Worker','Recovery')][string]$Mode='Start',
+    [string]$HomePassword,
+    [string]$EspPassword
+)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $HomeSSID = 'Peng'
@@ -19,6 +23,8 @@ $NewApPassword = $null
 $ReleaseBase = 'https://github.com/valerio1694-netizen/Esp32-flash/releases/download/eufy-apsta-peng-20261118'
 $FirmwarePath = Join-Path $StateDir 'Eufy-WROOM-OTA-app-only.bin'
 $CredsPath = Join-Path $StateDir 'wifi-credentials.txt'
+$LocalHomeKey = Join-Path $StateDir 'local-peng-secret.dpapi'
+$LocalEspKey = Join-Path $StateDir 'local-esp-secret.dpapi'
 $ExpectedSHA256 = '6685A7BD598F1B04802DA395B25D3C172F69EB94E74D6F5A3F1ACDA0099BE391'
 $FirmwareLength = 909808
 
@@ -26,6 +32,23 @@ function Log([string]$msg) {
     $line = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] ' + $msg
     try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
     Write-Output $line
+}
+# DPAPI protects secrets for THIS Windows user; scheduled tasks run under
+# the same account. No credentials are committed to the public repository.
+function Save-LocalSecret([string]$file,[string]$value) {
+    if ([string]::IsNullOrEmpty($value) -or $value.Length -lt 8 -or $value.Length -gt 63) {
+        throw 'WiFi password must be 8 to 63 characters.'
+    }
+    $encrypted=ConvertTo-SecureString $value -AsPlainText -Force | ConvertFrom-SecureString
+    [IO.File]::WriteAllText($file,$encrypted,(New-Object System.Text.UTF8Encoding($false)))
+}
+function Read-LocalSecret([string]$file) {
+    if (!(Test-Path -LiteralPath $file)) { return $null }
+    $cipher=[IO.File]::ReadAllText($file)
+    $secure=ConvertTo-SecureString $cipher
+    $ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 function Get-SavedWLANKey([string]$name) {
     # No WLAN scan or location permission is required: read only a KNOWN saved profile.
@@ -169,12 +192,14 @@ function Worker {
     $succeeded=$false
     try {
         Log 'WORKER gestartet: weiterhin auf Peng, WLAN-Zugangsdaten pruefen.'
-        # Peng's saved PSK is indispensable; if exporting it fails, NO WIFI SWITCH.
-        $pengPassword=Get-SavedWLANKey $HomeSSID
+        # Prefer locally provisioned DPAPI key, fallback to Windows WLAN profile.
+        $pengPassword=Read-LocalSecret $LocalHomeKey
+        if (!$pengPassword) { $pengPassword=Get-SavedWLANKey $HomeSSID }
         if (!$pengPassword -or $pengPassword.Length -lt 8 -or $pengPassword.Length -gt 63) {
             throw 'Peng-Passwort nicht aus gespeichertem Windows-WLAN-Profil lesbar. Kein WLAN-Wechsel.'
         }
-        $savedApPassword=Get-SavedWLANKey $EspSSID
+        $savedApPassword=Read-LocalSecret $LocalEspKey
+        if (!$savedApPassword) { $savedApPassword=Get-SavedWLANKey $EspSSID }
         $firmware=Write-Firmware
         $NewApPassword=Get-NewAPPassword
         Log 'Firmware bereit. Recovery-Task laeuft unabhaengig.'
@@ -288,15 +313,24 @@ function Bootstrap {
     New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
     # Stable script path for tasks even when Downloads or remote session is closed.
     if ($PSCommandPath -ne $SavedScript) { Copy-Item -LiteralPath $PSCommandPath -Destination $SavedScript -Force }
-    # PRE-FLIGHT: Validate both encrypted Windows WLAN profiles BEFORE creating tasks.
-    $homePass=Get-SavedWLANKey $HomeSSID
+    # PRE-FLIGHT: provided passwords are saved locally with Windows DPAPI.
+    # Check and download everything before changing Wi-Fi or losing VPN.
+    if ($HomePassword) { Save-LocalSecret $LocalHomeKey $HomePassword }
+    if ($EspPassword) { Save-LocalSecret $LocalEspKey $EspPassword }
+    $homePass=Read-LocalSecret $LocalHomeKey
+    if (!$homePass) { $homePass=Get-SavedWLANKey $HomeSSID }
     if (!$homePass -or $homePass.Length -lt 8 -or $homePass.Length -gt 63) {
-        throw 'Peng-WLAN-Passwort nicht lesbar. Skript stoppt OHNE WLAN-Wechsel. Fuer Export key=clear kann Adminrecht erforderlich sein.'
+        throw 'Peng-Passwort weder als Parameter noch als Windows-Profil vorhanden. Kein WLAN-Wechsel.'
     }
-    $espPass=Get-SavedWLANKey $EspSSID
+    $espPass=Read-LocalSecret $LocalEspKey
+    if (!$espPass) { $espPass=Get-SavedWLANKey $EspSSID }
     if (!$espPass -or $espPass.Length -lt 8 -or $espPass.Length -gt 63) {
         throw 'ESP-AP-Passwort im Windows-Profil nicht lesbar. Kein WLAN-Wechsel.'
     }
+    # Make sure both saved profiles really contain the supplied credentials
+    # so the recovery task can connect to Peng even after a broken OTA.
+    Set-WlanProfile $HomeSSID $homePass
+    Set-WlanProfile $EspSSID $espPass
     # Pruefsummen und Downloads VOR dem WLAN-Wechsel.
     Download-Firmware
     if (Get-ScheduledTask -TaskName $TaskWorker -ErrorAction SilentlyContinue) {
