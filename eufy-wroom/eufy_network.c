@@ -1,5 +1,5 @@
 /*
- * Eufy ESP32-WROOM: simultaneous AP fallback and Wi-Fi station.
+ * Eufy ESP32-WROOM: station-first Wi-Fi, AP only while disconnected.
  * Credentials are provisioned locally and stored in NVS, never at build time.
  * Does not access or reset the robot/GD32 MCU.
  * ESP-IDF 6.0.2, original ESP32.
@@ -35,7 +35,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         connected = false;
-        ESP_LOGW(TAG, "STA disconnected; AP remains available");
+        ESP_LOGW(TAG, "STA disconnected; fallback AP will be enabled");
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         connected = true;
         ip_event_got_ip_t *info = (ip_event_got_ip_t *)data;
@@ -45,16 +45,31 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void reconnect_task(void *arg)
 {
+    bool ap_enabled = true;
+    int retry_ticks = 0;
     (void)arg;
     while (true) {
-        if (configured && !connected) {
-            /* Avoid blocking the HTTP or SWD tasks on Wi-Fi retries. */
-            esp_err_t result = esp_wifi_connect();
-            if (result != ESP_OK && result != ESP_ERR_WIFI_CONN) {
-                ESP_LOGW(TAG, "STA connect retry: %s", esp_err_to_name(result));
-            }
+        /* Change Wi-Fi mode outside the event callback. This leaves SWD/HTTP running. */
+        if (connected && ap_enabled) {
+            esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+            if (err == ESP_OK) {
+                ap_enabled = false;
+                ESP_LOGI(TAG, "Connected to home Wi-Fi; fallback AP disabled");
+            } else ESP_LOGW(TAG, "Cannot disable AP: %s", esp_err_to_name(err));
+        } else if (!connected && !ap_enabled) {
+            esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+            if (err == ESP_OK) {
+                ap_enabled = true;
+                ESP_LOGW(TAG, "Home Wi-Fi lost; fallback AP enabled");
+            } else ESP_LOGW(TAG, "Cannot enable fallback AP: %s", esp_err_to_name(err));
         }
-        vTaskDelay(pdMS_TO_TICKS(20000));
+        if (configured && !connected && ++retry_ticks >= 5) {
+            retry_ticks = 0;
+            esp_err_t result = esp_wifi_connect();
+            if (result != ESP_OK && result != ESP_ERR_WIFI_CONN)
+                ESP_LOGW(TAG, "STA connect retry: %s", esp_err_to_name(result));
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -176,5 +191,5 @@ void eufy_network_start(void)
     }
     if (xTaskCreate(reconnect_task, "eufy_sta_retry", 3072, NULL, 2, NULL) != pdPASS)
         ESP_LOGE(TAG, "Cannot create STA reconnect task");
-    ESP_LOGI(TAG, "AP+STA initialized; fallback 192.168.4.1 stays active");
+    ESP_LOGI(TAG, "Station-first Wi-Fi initialized; fallback AP only when disconnected");
 }
