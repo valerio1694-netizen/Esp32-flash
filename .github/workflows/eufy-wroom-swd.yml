@@ -58,28 +58,61 @@ jobs:
           CONFIG_ESP_DAP_SOFTAP_PASSWORD="$AP_PASSWORD"
           CONFIG_COMPILER_OPTIMIZATION_PERF=y
           EOF
+          # Explicitly select the classic ESP32 preset, not the repo's first S3 preset.
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("upstream/CMakePresets.json")
+          j = json.loads(p.read_text())
+          j["configurePresets"].insert(0, {
+              "name": "board_eufy_wroom",
+              "displayName": "Eufy ESP32-WROOM-32",
+              "binaryDir": "build/build_eufy_wroom",
+              "cacheVariables": {
+                  "IDF_TARGET": "esp32",
+                  "SDKCONFIG": "build/build_eufy_wroom/sdkconfig",
+                  "SDKCONFIG_DEFAULTS": "sdkconfig.board_eufy_wroom"
+              }
+          })
+          p.write_text(json.dumps(j, indent=2) + "\n")
+          PY
       - name: Configure and compile for original ESP32
         working-directory: upstream
         shell: bash
         run: |
           set -euo pipefail
-          export SDKCONFIG_DEFAULTS=sdkconfig.board_eufy_wroom
+          export IDF_PRESET=board_eufy_wroom
           idf.py set-target esp32
           idf.py build
-          grep -E 'CONFIG_IDF_TARGET=|CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=|CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=|CONFIG_ESP_UART_BRIDGE_1_TXD_PIN=|CONFIG_ESP_UART_BRIDGE_1_RXD_PIN=|CONFIG_ESP_DAP_WIFI_MODE_AP=' sdkconfig
+          grep -E 'CONFIG_IDF_TARGET=|CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=|CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=|CONFIG_ESP_UART_BRIDGE_1_TXD_PIN=|CONFIG_ESP_UART_BRIDGE_1_RXD_PIN=|CONFIG_ESP_DAP_WIFI_MODE_AP=' build/build_eufy_wroom/sdkconfig
+          python - <<'PY'
+          from pathlib import Path
+          s = Path("build/build_eufy_wroom/sdkconfig").read_text()
+          expected = [
+              'CONFIG_IDF_TARGET="esp32"',
+              'CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=18',
+              'CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=19',
+              'CONFIG_ESP_UART_BRIDGE_1_TXD_PIN=17',
+              'CONFIG_ESP_UART_BRIDGE_1_RXD_PIN=16',
+              'CONFIG_ESP_DAP_WIFI_MODE_AP=y'
+          ]
+          missing = [line for line in expected if line not in s.splitlines()]
+          if missing: raise SystemExit(f"Incorrect ESP32-WROOM configuration: {missing}")
+          print("Verified target=esp32, SWD 18/19, UART 17/16, AP mode")
+          PY
       - name: Package single-file flash image and component images
         shell: bash
         run: |
           set -euo pipefail
-          cp upstream/build/bootloader/bootloader.bin dist/bootloader.bin
-          cp upstream/build/partition_table/partition-table.bin dist/partition-table.bin
-          cp upstream/build/cmsis_dap_tcp_esp32.bin dist/firmware.bin
+          cp upstream/build/build_eufy_wroom/bootloader/bootloader.bin dist/bootloader.bin
+          cp upstream/build/build_eufy_wroom/partition_table/partition-table.bin dist/partition-table.bin
+          cp upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin dist/firmware.bin
           python -m esptool --chip esp32 merge-bin \
             --flash-mode dio --flash-freq 40m --flash-size 4MB \
             -o dist/Eufy-WROOM-SWD-full.bin \
-            0x1000 upstream/build/bootloader/bootloader.bin \
-            0x8000 upstream/build/partition_table/partition-table.bin \
-            0x10000 upstream/build/cmsis_dap_tcp_esp32.bin
+            0x1000 upstream/build/build_eufy_wroom/bootloader/bootloader.bin \
+            0x8000 upstream/build/build_eufy_wroom/partition_table/partition-table.bin \
+            0x10000 upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin
           cp upstream-commit.txt dist/upstream-commit.txt
           sha256sum dist/*.bin > dist/SHA256SUMS
           test -s dist/Eufy-WROOM-SWD-full.bin
