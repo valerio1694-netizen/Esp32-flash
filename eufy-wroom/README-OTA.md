@@ -47,3 +47,31 @@ Native Java-Anwendung, alle neuen/alten JSON-Felder werden rekursiv angezeigt.
 Einstellbare ESP-Adresse; Liveaktualisierung; BIN-Datei über Dokumentauswahl
 für OTA einspielen; AP-Passwort wird dafür eingegeben und nicht gespeichert.
 APK im GitHub-Actions-Artefakt `Eufy-Android-APK`.
+
+
+## Peng / AP-Fallback, OTA ab dieser Version
+Nach dem OTA startet die Firmware weiterhin mit dem lokalen AP \`Eufy-SWD-WROOM\`.
+Gleichzeitig aktiviert der ESP32 die Station. Per HTTP im AP:
+- \`GET http://192.168.4.1:8081/wifi/status\` liefert \`sta_connected\` und \`sta_ip\`.
+- \`POST http://192.168.4.1:8081/wifi/config\` speichert die STA-Daten im NVS
+  (nicht im GitHub-Repository) und startet die Verbindung mit dem Heim-WLAN.
+  Header: \`X-OTA-Token\` aktuelles AP-Passwort,
+  \`X-STA-SSID\` Heimnetz-SSID, \`X-STA-PASSWORD\` Heimnetz-Passwort.
+  Body bleibt leer.
+- Solange das Heimnetz nicht erreichbar ist, bleibt der AP samt OTA erreichbar.
+  Der AP ist auch bei erfolgreicher STA-Verbindung weiter eingeschaltet.
+- Für den ersten Übergang vom vorigen Firmwarestand kann sich das AP-Passwort
+  einmalig ändern. Das Passwort der NEUEN Firmware steht im Build-Artefakt
+  unter \`wifi-credentials.txt\`. Ab dann wird das aktive AP-Passwort im NVS
+  gespeichert und bei späteren OTA-Updates beibehalten.
+- \`/status\` auf Port 8081 prüft OTA; \`/health\` auf Port 8080 prüft den
+  HTTP-Telemetrieserver; \`/telemetry\` auf Port 8080 liefert Roboter-Rohdaten.
+- Der Laptop-Wechsel kann ohne WLAN-Scan durch netsh mit bekannten Profilen
+  automatisiert werden. Ein unabhängiger Windows-Task sollte die Rückkehr zu
+  \`Peng\` absichern.
+- ESP32-WROOM unterstützt ausschließlich 2,4-GHz-WLAN. SSID \`Peng\` muss
+  auf 2,4 GHz verfügbar sein.
+- Hinweis: WPA2-AP und HTTP-Kommunikation im lokalen WLAN, keine TLS-Verschlüsselung
+  und keine Portfreigabe ins Internet vornehmen.
+
+Build noch nicht am echten Roboter auf AP+STA getestet.
