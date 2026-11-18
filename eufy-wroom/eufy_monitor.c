@@ -45,6 +45,8 @@ typedef struct {
     uint16_t run_time, run_time_1, stop_time, stop_time_1;
     uint16_t dock_time, work_l, dock_l, fs_raw, diagnostic_213_a, diagnostic_213_b;
     uint8_t wall_flag, fan_level, fan_mode, power_boost, remote_wall_follow;
+    uint16_t wall_bump_count, charge_counter, charge_control_state;
+    uint8_t charge_activity_flag;
     uint32_t remote_spiral_raw, robot_flags;
     uint16_t gpio_idr[5];
     char status[36];
@@ -197,6 +199,7 @@ void eufy_monitor_poll(void) {
     uint32_t timer_words[8] = {0}, stop_words[2] = {0}, wall_words[2] = {0};
     uint32_t fan_words[2] = {0}, wall_flag_words[2] = {0};
     uint32_t fan_level_word[1] = {0}, fs_word[1] = {0};
+    uint32_t bump_word[1] = {0}, charge_stage[1] = {0}, charge_activity[1] = {0};
     uint32_t robot_flags[1] = {0}, change_time[1] = {0}, fan_pwm[1] = {0};
     bool diag_ok =
         read_words(0x20000390U, 8, timer_words) &&
@@ -206,6 +209,9 @@ void eufy_monitor_poll(void) {
         read_words(0x20000428U, 2, fan_words) &&
         read_words(0x20000180U, 1, fan_level_word) &&
         read_words(0x200003C4U, 1, fs_word) &&
+        read_words(0x20000630U, 1, bump_word) &&
+        read_words(0x2000030CU, 1, charge_stage) &&
+        read_words(0x20000280U, 1, charge_activity) &&
         read_words(0x20000024U, 1, robot_flags) &&
         read_words(0x2000003CU, 1, change_time) &&
         read_words(0x40012C3CU, 1, fan_pwm);
@@ -229,11 +235,18 @@ void eufy_monitor_poll(void) {
         latest.wall_count = wall_words[0];
         latest.wall_count_1 = wall_words[1];
         latest.wall_flag = (uint8_t)wall_flag_words[0];
-        latest.fan_level = (uint8_t)fan_level_word[0];
-        latest.fan_mode = (uint8_t)(status_word[0] >> 24);
-        latest.power_boost = (uint8_t)(fan_words[1] >> 16);
-        latest.remote_wall_follow = (uint8_t)(fan_words[1] >> 24);
-        latest.remote_spiral_raw = (uint8_t)(fan_words[0] >> 16);
+        /* Diagnostic 202/206: FanLevel/g_FanLevel=0x20000397,
+           Fan_Mode=0x20000180; PowerBoost=0x2000042A,
+           WallFollow=0x2000042E, Spiral=0x2000042F. */
+        latest.fan_level = (uint8_t)(status_word[0] >> 24);
+        latest.fan_mode = (uint8_t)fan_level_word[0];
+        latest.power_boost = (uint8_t)(fan_words[0] >> 16);
+        latest.remote_wall_follow = (uint8_t)(fan_words[1] >> 16);
+        latest.remote_spiral_raw = (uint8_t)(fan_words[1] >> 24);
+        latest.wall_bump_count = (uint16_t)(bump_word[0] >> 16);
+        latest.charge_counter = (uint16_t)charge_stage[0];
+        latest.charge_control_state = (uint16_t)(charge_stage[0] >> 16);
+        latest.charge_activity_flag = (uint8_t)(charge_activity[0] >> 8);
         latest.fs_raw = (uint16_t)fs_word[0];
         latest.diagnostic_213_a = (uint16_t)(analog[6] >> 16);
         latest.diagnostic_213_b = (uint16_t)wall_flag_words[1];
@@ -339,10 +352,12 @@ static void eufy_http_task(void *arg) {
             "\"power_boost_raw\":%u,\"remote_wall_follow_raw\":%u,"
             "\"remote_spiral_raw\":%lu,\"fs_raw\":%u,"
             "\"diag_213_first_raw\":%u,\"diag_213_second_raw\":%u,"
-            "\"robot_flags_raw\":%lu},"
+            "\"robot_flags_raw\":%lu,\"charge_counter_raw\":%u,"
+            "\"charge_control_state_raw\":%u,\"charge_activity_flag_raw\":%u},"
             "\"gpio_inputs\":{\"valid\":%s,\"A\":%u,\"B\":%u,"
             "\"C\":%u,\"D\":%u,\"E\":%u},"
-            "\"bumper\":{\"mapped\":false,\"reason\":\"pin_mapping_unverified\"}}\n",
+            "\"bumper\":{\"channels_mapped\":false,\"wall_bump_count_raw\":%u,"
+            "\"reason\":\"individual_pins_unverified\"}}\n",
             s.status, s.valid ? "true" : "false",
             s.host_connected ? "true" : "false",
             (long long)age_ms, (unsigned long)s.errors, (unsigned long)s.dpidr,
@@ -365,9 +380,11 @@ static void eufy_http_task(void *arg) {
             s.fan_mode, (unsigned long)s.fan_pwm, s.power_boost,
             s.remote_wall_follow, (unsigned long)s.remote_spiral_raw,
             s.fs_raw, s.diagnostic_213_a, s.diagnostic_213_b,
-            (unsigned long)s.robot_flags, s.gpio_valid ? "true" : "false",
+            (unsigned long)s.robot_flags,
+            s.charge_counter, s.charge_control_state, s.charge_activity_flag,
+            s.gpio_valid ? "true" : "false",
             s.gpio_idr[0], s.gpio_idr[1], s.gpio_idr[2],
-            s.gpio_idr[3], s.gpio_idr[4]);
+            s.gpio_idr[3], s.gpio_idr[4], s.wall_bump_count);
         if (pn > 0 && pn < sizeof(payload)) {
             char head[180];
             int hn = snprintf(head, sizeof(head),
