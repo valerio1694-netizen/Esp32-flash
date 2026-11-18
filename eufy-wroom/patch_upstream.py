@@ -29,16 +29,16 @@ src.write_text(s)
 main=root / "main" / "main.c"
 m=main.read_text()
 if m.count('#include "cmsis_dap_tcp.h"')!=1: raise SystemExit("main.c include missing")
-m=m.replace('#include "cmsis_dap_tcp.h"','#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"\n#include "eufy_ota.h"')
+m=m.replace('#include "cmsis_dap_tcp.h"','#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"\n#include "eufy_ota.h"\n#include "eufy_network.h"')
 key='    if(cmsis_dap_tcp_task_start() != pdPASS) {'
 if m.count(key)!=1: raise SystemExit("main.c init anchor missing")
-m=m.replace(key,'    eufy_monitor_server_start();\n    eufy_ota_server_start();\n\n'+key)
+m=m.replace(key,'    eufy_network_start();\n    eufy_monitor_server_start();\n    eufy_ota_server_start();\n\n'+key)
 main.write_text(m)
 cm=root / "main" / "CMakeLists.txt"
 c=cm.read_text()
 key='    "cmsis_dap_tcp.c")'
 if c.count(key)!=1: raise SystemExit("CMakeLists anchor missing")
-c=c.replace(key,'    "cmsis_dap_tcp.c"\n    "eufy_monitor.c"\n    "eufy_ota.c")')
+c=c.replace(key,'    "cmsis_dap_tcp.c"\n    "eufy_monitor.c"\n    "eufy_ota.c"\n    "eufy_network.c")')
 c=c.replace('"esp_timer" "esp_wifi"', '"esp_timer" "esp_wifi" "app_update" "esp_http_server"')
 cm.write_text(c)
 print("Eufy read-only monitor injected into CMSIS-DAP TCP owner task.")
