@@ -24,14 +24,10 @@ static bool authorized(httpd_req_t *r) {
     if (!length || length >= sizeof(token)) return false;
     if (httpd_req_get_hdr_value_str(r, "X-OTA-Token", token, sizeof(token)) != ESP_OK)
         return false;
-    /* The AP password is persisted in NVS after first APSTA boot, so
-       a newer OTA image may have a different compiled default password. */
-    wifi_config_t ap = {0};
-    if (esp_wifi_get_config(WIFI_IF_AP, &ap) != ESP_OK)
-        return false;
-    char current_password[65] = {0};
-    memcpy(current_password, ap.ap.password, 64);
-    return strcmp(token, current_password) == 0;
+    /* This must work when the AP is OFF and the ESP is STA-only. */
+    bool ok = eufy_network_token_valid(token);
+    memset(token, 0, sizeof(token));
+    return ok;
 }
 static esp_err_t status_handler(httpd_req_t *r) {
     const esp_partition_t *running = esp_ota_get_running_partition();
