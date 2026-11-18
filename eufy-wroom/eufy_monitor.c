@@ -329,7 +329,7 @@ static void eufy_http_task(void *arg) {
                even when SWD cannot communicate with the GD32. */
             static const char health[] =
                 "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
-                "Content-Length: 12\r\nConnection: close\r\n\r\n"
+                "Content-Length: 13\r\nConnection: close\r\n\r\n"
                 "{\"http\":true}";
             send(fd, health, sizeof(health)-1, 0);
             close(fd);
