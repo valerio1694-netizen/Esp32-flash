@@ -97,8 +97,17 @@ function Set-WlanProfile([string]$ssid,[string]$password) {
     $tmp = Join-Path $env:TEMP ('eufy_wifi_' + [guid]::NewGuid().ToString('N') + '.xml')
     try {
         [IO.File]::WriteAllText($tmp, $xml, (New-Object System.Text.UTF8Encoding($false)))
-        & netsh.exe wlan add profile "filename=$tmp" 'user=current' 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "WLAN-Profil konnte nicht gespeichert werden: $ssid" }
+        $netshResult=(& netsh.exe wlan add profile "filename=$tmp" 'user=current' 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            # A profile might already exist and be usable. Let the following
+            # real connection and HTTP test decide, instead of aborting
+            # without trying the existing profile.
+            $profileResult=(& netsh.exe wlan show profile "name=$ssid" 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+                throw "WLAN-Profil $ssid nicht verfuegbar. netsh: $netshResult"
+            }
+            Log "WLAN-Profil $ssid vorhanden; Import abgewiesen: $netshResult"
+        }
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
@@ -200,14 +209,15 @@ function Worker {
         }
         $savedApPassword=Read-LocalSecret $LocalEspKey
         if (!$savedApPassword) { $savedApPassword=Get-SavedWLANKey $EspSSID }
-        # Prepare the Windows WLAN profiles ONLY inside the scheduled worker:
-        # recovery task is already armed before potentially disrupting Peng.
-        Set-WlanProfile $HomeSSID $pengPassword
-        if ($savedApPassword) { Set-WlanProfile $EspSSID $savedApPassword }
+        # Peng is ALREADY connected, and Windows already has its working
+        # WLAN profile. Never overwrite it: the previous version failed here.
+        # Recovery calls 'netsh wlan connect name=Peng' using this profile.
+        Log 'Peng-Profil bleibt unveraendert; nutze bestehende Verbindung.'
         $firmware=Write-Firmware
         $NewApPassword=Get-NewAPPassword
         Log 'Firmware bereit. Recovery-Task laeuft unabhaengig.'
         # Candidates: existing Windows AP profile and freshly downloaded build credentials.
+        # Keep Peng untouched; AP import is only attempted for candidate keys.
         $espPassword=$null
         $status=$null
         $candidates = @($savedApPassword,$NewApPassword) |
