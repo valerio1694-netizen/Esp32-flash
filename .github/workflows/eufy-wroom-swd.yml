@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - feature/eufy-wroom-cmsis-dap
+      - feature/eufy-wroom-ota
     paths:
       - ".github/workflows/eufy-wroom-swd.yml"
       - "eufy-wroom/**"
@@ -29,7 +30,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp eufy-wroom/eufy_monitor.c eufy-wroom/eufy_monitor.h upstream/main/
+          cp eufy-wroom/eufy_monitor.c eufy-wroom/eufy_monitor.h eufy-wroom/eufy_ota.c eufy-wroom/eufy_ota.h upstream/main/
+          cp eufy-wroom/partitions_ota.csv upstream/partitions_eufy.csv
           python eufy-wroom/patch_upstream.py upstream
           grep -n eufy_monitor upstream/main/{main.c,cmsis_dap_tcp.c,CMakeLists.txt}
       - name: Generate WROOM config and unique WLAN password
@@ -43,6 +45,9 @@ jobs:
           CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
           CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
           CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+          CONFIG_PARTITION_TABLE_CUSTOM=y
+          CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_eufy.csv"
+          CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
           CONFIG_ESP_CONSOLE_UART_DEFAULT=y
           CONFIG_ESP_DAP_1_SWD_SUPPORTED=y
           CONFIG_ESP_DAP_1_JTAG_SUPPORTED=n
@@ -116,20 +121,31 @@ jobs:
           cp upstream/build/build_eufy_wroom/bootloader/bootloader.bin dist/bootloader.bin
           cp upstream/build/build_eufy_wroom/partition_table/partition-table.bin dist/partition-table.bin
           cp upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin dist/firmware.bin
-          cp dist/firmware.bin dist/Eufy-WROOM-TELEMETRY-app-only.bin
+          cp dist/firmware.bin dist/Eufy-WROOM-OTA-app-only.bin
+          cp eufy-wroom/partitions_ota.csv dist/partitions_ota.csv
           python -m esptool --chip esp32 merge-bin \
             --flash-mode dio --flash-freq 40m --flash-size 4MB \
-            -o dist/Eufy-WROOM-SWD-full.bin \
+            -o dist/Eufy-WROOM-OTA-full.bin \
             0x1000 upstream/build/build_eufy_wroom/bootloader/bootloader.bin \
             0x8000 upstream/build/build_eufy_wroom/partition_table/partition-table.bin \
             0x10000 upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin
-          cp eufy-wroom/Flash-COM10-Telemetry.ps1 dist/Flash-COM10-Telemetry.ps1
+          cp eufy-wroom/Flash-COM10-OTA.ps1 dist/Flash-COM10-OTA.ps1
           cp upstream-commit.txt dist/upstream-commit.txt
+          python - <<'PY'
+          from pathlib import Path
+          bin = Path('dist/firmware.bin')
+          assert bin.stat().st_size < 0x160000, "OTA app exceeds slot"
+          cfg = Path("upstream/build/build_eufy_wroom/sdkconfig").read_text()
+          assert 'CONFIG_PARTITION_TABLE_CUSTOM=y' in cfg
+          assert 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' in cfg
+          assert 'CONFIG_IDF_TARGET="esp32"' in cfg
+          print("OTA slot / rollback settings validated",bin.stat().st_size)
+          PY
           sha256sum dist/*.bin > dist/SHA256SUMS
-          test -s dist/Eufy-WROOM-SWD-full.bin
+          test -s dist/Eufy-WROOM-OTA-full.bin
       - uses: actions/upload-artifact@v4
         with:
-          name: Eufy-WROOM-SWD-TELEMETRY
+          name: Eufy-WROOM-OTA-TELEMETRY
           path: dist/*
           if-no-files-found: error
           retention-days: 30

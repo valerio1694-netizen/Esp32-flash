@@ -29,7 +29,7 @@ src.write_text(s)
 main=root / "main" / "main.c"
 m=main.read_text()
 if m.count('#include "cmsis_dap_tcp.h"')!=1: raise SystemExit("main.c include missing")
-m=m.replace('#include "cmsis_dap_tcp.h"','#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"')
+m=m.replace('#include "cmsis_dap_tcp.h"','#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"\n#include "eufy_ota.h"')
 key='    if(cmsis_dap_tcp_task_start() != pdPASS) {'
 if m.count(key)!=1: raise SystemExit("main.c init anchor missing")
 m=m.replace(key,'    eufy_monitor_server_start();\n    eufy_ota_server_start();\n\n'+key)
