@@ -22,7 +22,16 @@ jobs:
       - name: Retrieve CMSIS-DAP TCP firmware
         run: |
           git clone --depth 1 https://github.com/bkuschak/cmsis_dap_tcp_esp32.git upstream
+          git -C upstream fetch --depth 1 origin f615f35b1a242ebfba160cb61fdd3d1b9de54497
+          git -C upstream checkout --detach f615f35b1a242ebfba160cb61fdd3d1b9de54497
           git -C upstream rev-parse HEAD | tee upstream-commit.txt
+      - name: Integrate read-only SWD live telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp eufy-wroom/eufy_monitor.c eufy-wroom/eufy_monitor.h upstream/main/
+          python eufy-wroom/patch_upstream.py upstream
+          grep -n eufy_monitor upstream/main/{main.c,cmsis_dap_tcp.c,CMakeLists.txt}
       - name: Generate WROOM config and unique WLAN password
         shell: bash
         run: |
@@ -107,6 +116,7 @@ jobs:
           cp upstream/build/build_eufy_wroom/bootloader/bootloader.bin dist/bootloader.bin
           cp upstream/build/build_eufy_wroom/partition_table/partition-table.bin dist/partition-table.bin
           cp upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin dist/firmware.bin
+          cp dist/firmware.bin dist/Eufy-WROOM-TELEMETRY-app-only.bin
           python -m esptool --chip esp32 merge-bin \
             --flash-mode dio --flash-freq 40m --flash-size 4MB \
             -o dist/Eufy-WROOM-SWD-full.bin \
@@ -118,7 +128,7 @@ jobs:
           test -s dist/Eufy-WROOM-SWD-full.bin
       - uses: actions/upload-artifact@v4
         with:
-          name: Eufy-WROOM-CMSIS-DAP-TCP
+          name: Eufy-WROOM-SWD-TELEMETRY
           path: dist/*
           if-no-files-found: error
           retention-days: 30
