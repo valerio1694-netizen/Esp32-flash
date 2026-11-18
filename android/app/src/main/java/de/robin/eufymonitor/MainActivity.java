@@ -163,6 +163,14 @@ public class MainActivity extends Activity {
         return "–".equals(val) ? val : val + " raw";
     }
 
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         currentHost = getPreferences(MODE_PRIVATE).getString("host", "192.168.4.1");
@@ -173,7 +181,7 @@ public class MainActivity extends Activity {
 
         TextView brand = text("EUFY 15C", 26, FG, true);
         root.addView(brand);
-        TextView details = text("ROBOTER-DIAGNOSE  •  ESP32 / GD32", 11, SECONDARY, true);
+        TextView details = text("APP v" + appVersion() + "  •  ESP32 / GD32", 11, SECONDARY, true);
         spaced(root, details, 12);
 
         connectionBanner = text(lastMessage, 12, AMBER, true);
@@ -531,7 +539,9 @@ public class MainActivity extends Activity {
                             "\nIP: " + obj.optString("sta_ip", "–") +
                             "\nESP-AP: " + obj.optString("fallback_ap", "–");
                 } else if ("/status".equals(route)) {
-                    description = "OTA aktiv: " + obj.optBoolean("ota", false) +
+                    description = "ESP32-Firmware: " +
+                            obj.optString("firmware_version", "alte Version / nicht angegeben") +
+                            "\nOTA aktiv: " + obj.optBoolean("ota", false) +
                             "\nAktiv: " + obj.optString("running", "–") +
                             "\nNächste Partition: " + obj.optString("next", "–") +
                             "\nMaximale BIN: " + obj.optLong("next_size", -1) + " Byte";

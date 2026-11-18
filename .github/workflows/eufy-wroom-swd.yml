@@ -39,6 +39,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          FW_VERSION="$(tr -d '\r\n' < eufy-wroom/VERSION)"
+          [[ "$FW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid firmware VERSION"; exit 1; }
+          echo "EUFY_FW_VERSION=$FW_VERSION" >> "$GITHUB_ENV"
           AP_PASSWORD="$(openssl rand -hex 16)"
           printf 'SSID=Eufy-SWD-WROOM\nPASSWORD=%s\nIP=192.168.4.1\nCMSIS_DAP_TCP_PORT=4441\n' "$AP_PASSWORD" > dist/wifi-credentials.txt
           cat > upstream/sdkconfig.board_eufy_wroom <<EOF
@@ -122,19 +125,24 @@ jobs:
           cp upstream/build/build_eufy_wroom/partition_table/partition-table.bin dist/partition-table.bin
           cp upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin dist/firmware.bin
           cp dist/firmware.bin dist/Eufy-WROOM-OTA-app-only.bin
+          cp dist/firmware.bin "dist/Eufy-WROOM-FW-v${EUFY_FW_VERSION}-OTA-app-only.bin"
+          printf '%s\n' "$EUFY_FW_VERSION" > dist/FIRMWARE-VERSION.txt
           cp eufy-wroom/partitions_ota.csv dist/partitions_ota.csv
+          cp eufy-wroom/VERSION dist/source-firmware-version.txt
           python -m esptool --chip esp32 merge-bin \
             --flash-mode dio --flash-freq 40m --flash-size 4MB \
             -o dist/Eufy-WROOM-OTA-full.bin \
             0x1000 upstream/build/build_eufy_wroom/bootloader/bootloader.bin \
             0x8000 upstream/build/build_eufy_wroom/partition_table/partition-table.bin \
             0x10000 upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin
+          cp "dist/Eufy-WROOM-OTA-full.bin" "dist/Eufy-WROOM-FW-v${EUFY_FW_VERSION}-full.bin"
           cp eufy-wroom/Flash-COM10-OTA.ps1 dist/Flash-COM10-OTA.ps1
           cp upstream-commit.txt dist/upstream-commit.txt
           mkdir -p dist/source
           cp eufy-wroom/*.c eufy-wroom/*.h eufy-wroom/*.py dist/source/
           cp eufy-wroom/partitions_ota.csv dist/source/
           cp eufy-wroom/README-OTA.md dist/source/
+          cp eufy-wroom/VERSION dist/source/
           cp .github/workflows/eufy-wroom-swd.yml dist/source/
           printf 'FIRMWARE_COMMIT=%s\nUPSTREAM_REF=%s\n' "$GITHUB_SHA" "$(cat upstream-commit.txt)" > dist/source/build-versions.txt
           python - <<'PY'
@@ -151,7 +159,7 @@ jobs:
           test -s dist/Eufy-WROOM-OTA-full.bin
       - uses: actions/upload-artifact@v4
         with:
-          name: Eufy-WROOM-OTA-TELEMETRY
+          name: Eufy-WROOM-FW-v${{ env.EUFY_FW_VERSION }}
           path: dist/*
           if-no-files-found: error
           retention-days: 30

@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "eufy_ota.h"
 #include "eufy_network.h"
+#include "eufy_version.h"
 #include "esp_wifi.h"
 #define OTA_PORT 8081
 static const char *TAG = "eufy_ota";
@@ -38,7 +39,8 @@ static esp_err_t status_handler(httpd_req_t *r) {
     char json[256];
     int n = snprintf(json, sizeof(json),
         "{\"ota\":true,\"upload_path\":\"/upload\",\"auth\":\"X-OTA-Token\","
-        "\"running\":\"%s\",\"next\":\"%s\",\"next_size\":%lu}",
+        "\"firmware_version\":\"%s\",\"running\":\"%s\",\"next\":\"%s\",\"next_size\":%lu}",
+        EUFY_FIRMWARE_VERSION,
         running ? running->label : "unknown",
         next ? next->label : "unavailable",
         (unsigned long)(next ? next->size : 0));

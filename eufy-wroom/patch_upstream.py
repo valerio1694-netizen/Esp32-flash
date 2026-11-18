@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """Patch pinned upstream CMSIS-DAP TCP to poll GD32 only while no debugger owns SWD."""
 from pathlib import Path
+import re
 import sys
 root = Path(sys.argv[1])
+version = (Path(__file__).parent / "VERSION").read_text().strip()
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit(f"Invalid Eufy firmware version: {version!r}")
+project_cmake = root / "CMakeLists.txt"
+project_source = project_cmake.read_text()
+anchor = "project(cmsis_dap_tcp_esp32)"
+if project_source.count(anchor) != 1:
+    raise SystemExit("Cannot locate upstream project() to assign the version")
+project_cmake.write_text(project_source.replace(anchor, f'set(PROJECT_VER "{version}")\n' + anchor))
+(root / "main" / "eufy_version.h").write_text(
+    f'#pragma once\n#define EUFY_FIRMWARE_VERSION "{version}"\n'
+)
 src = root / "main" / "cmsis_dap_tcp.c"
 s = src.read_text()
 def replace_once(old, new):
