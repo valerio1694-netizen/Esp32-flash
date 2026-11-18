@@ -30,7 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp eufy-wroom/eufy_monitor.c eufy-wroom/eufy_monitor.h eufy-wroom/eufy_ota.c eufy-wroom/eufy_ota.h upstream/main/
+          cp eufy-wroom/eufy_monitor.c eufy-wroom/eufy_monitor.h eufy-wroom/eufy_ota.c eufy-wroom/eufy_ota.h eufy-wroom/eufy_network.c eufy-wroom/eufy_network.h upstream/main/
           cp eufy-wroom/partitions_ota.csv upstream/partitions_eufy.csv
           python eufy-wroom/patch_upstream.py upstream
           grep -n eufy_monitor upstream/main/{main.c,cmsis_dap_tcp.c,CMakeLists.txt}
@@ -131,6 +131,12 @@ jobs:
             0x10000 upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin
           cp eufy-wroom/Flash-COM10-OTA.ps1 dist/Flash-COM10-OTA.ps1
           cp upstream-commit.txt dist/upstream-commit.txt
+          mkdir -p dist/source
+          cp eufy-wroom/*.c eufy-wroom/*.h eufy-wroom/*.py dist/source/
+          cp eufy-wroom/partitions_ota.csv dist/source/
+          cp eufy-wroom/README-OTA.md dist/source/
+          cp .github/workflows/eufy-wroom-swd.yml dist/source/
+          printf 'FIRMWARE_COMMIT=%s\nUPSTREAM_REF=%s\n' "$GITHUB_SHA" "$(cat upstream-commit.txt)" > dist/source/build-versions.txt
           python - <<'PY'
           from pathlib import Path
           bin = Path('dist/firmware.bin')
