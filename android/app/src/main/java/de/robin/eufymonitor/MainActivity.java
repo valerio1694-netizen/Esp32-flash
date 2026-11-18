@@ -48,21 +48,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Eufy RoboVac 15C – read-only GD32 diagnostics via independently powered ESP32-WROOM. */
 public class MainActivity extends Activity {
     private static final int FILE_REQUEST = 1001;
-    private static final int BG = Color.rgb(10, 16, 27);
-    private static final int PANEL = Color.rgb(24, 35, 52);
-    private static final int PANEL_2 = Color.rgb(33, 47, 67);
+    private static final int BG = Color.rgb(9, 15, 27);
+    private static final int PANEL = Color.rgb(21, 33, 52);
+    private static final int PANEL_2 = Color.rgb(32, 48, 71);
     private static final int FG = Color.rgb(238, 245, 253);
     private static final int SECONDARY = Color.rgb(165, 187, 207);
-    private static final int GREEN = Color.rgb(93, 220, 187);
+    private static final int GREEN = Color.rgb(87, 223, 191);
     private static final int AMBER = Color.rgb(250, 194, 102);
     private static final int RED = Color.rgb(251, 130, 131);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean(false);
 
-    private final String[] tabs = {"Übersicht", "Sensoren", "Diagnose", "Verbindung & OTA"};
+    private final String[] tabs = {"Übersicht", "Sensoren", "Diagnose", "Einstellungen"};
     private TextView connectionBanner, heading, subtitle;
     private LinearLayout content, navigation;
+    private ScrollView mainScroll;
+    private Button settingsButton;
     private EditText hostEdit, tokenEdit, ssidEdit, wifiPassEdit;
     private JSONObject current = null;
     private String currentHost = "192.168.4.1";
@@ -182,38 +184,49 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         currentHost = getPreferences(MODE_PRIVATE).getString("host", "192.168.4.1");
+
         LinearLayout root = vertical();
         root.setBackgroundColor(BG);
-        root.setPadding(dp(16), dp(14), dp(16), dp(10));
+        root.setPadding(dp(18), dp(12), dp(18), dp(8));
         setContentView(root);
 
-        TextView brand = text("EUFY 15C", 26, FG, true);
-        root.addView(brand);
-        TextView details = text("APP v" + appVersion() + "  •  ESP32 / GD32", 11, SECONDARY, true);
-        spaced(root, details, 12);
+        LinearLayout header = horizontal();
+        LinearLayout brandCol = vertical();
+        TextView brand = text("EUFY  /  15C", 25, FG, true);
+        brandCol.addView(brand);
+        TextView edition = text("DIAGNOSE-CENTER    v" + appVersion(), 11, SECONDARY, true);
+        spaced(brandCol, edition, 1);
+        header.addView(brandCol, new LinearLayout.LayoutParams(0, -2, 1f));
+        settingsButton = button("⚙");
+        settingsButton.setTextSize(23);
+        settingsButton.setBackground(background(PANEL, 13));
+        header.addView(settingsButton, new LinearLayout.LayoutParams(dp(56), dp(49)));
+        settingsButton.setOnClickListener(v -> openTab(3));
+        spaced(root, header, 18);
 
-        connectionBanner = text(lastMessage, 12, AMBER, true);
-        connectionBanner.setPadding(dp(12), dp(10), dp(12), dp(10));
-        connectionBanner.setBackground(background(PANEL, 11));
-        spaced(root, connectionBanner, 12);
-
-        HorizontalScrollView scrollTabs = new HorizontalScrollView(this);
-        scrollTabs.setHorizontalScrollBarEnabled(false);
-        navigation = horizontal();
-        scrollTabs.addView(navigation);
-        spaced(root, scrollTabs, 12);
+        connectionBanner = text(lastMessage, 13, AMBER, true);
+        connectionBanner.setPadding(dp(15), dp(12), dp(15), dp(12));
+        connectionBanner.setBackground(background(PANEL, 13));
+        spaced(root, connectionBanner, 16);
 
         heading = text("", 22, FG, true);
-        spaced(root, heading, 1);
+        spaced(root, heading, 4);
         subtitle = text("", 12, SECONDARY, false);
-        spaced(root, subtitle, 14);
+        spaced(root, subtitle, 16);
 
-        ScrollView mainScroll = new ScrollView(this);
+        mainScroll = new ScrollView(this);
         mainScroll.setFillViewport(true);
+        mainScroll.setVerticalScrollBarEnabled(false);
         content = vertical();
-        content.setPadding(0, 0, 0, dp(22));
+        content.setPadding(0, dp(2), 0, dp(20));
         mainScroll.addView(content);
         root.addView(mainScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        navigation = horizontal();
+        navigation.setPadding(dp(4), dp(8), dp(4), dp(4));
+        navigation.setBackground(background(PANEL, 16));
+        root.addView(navigation, new LinearLayout.LayoutParams(-1, dp(67)));
+
         openTab(0);
     }
     private void updateBanner(String message, boolean good) {
@@ -226,79 +239,122 @@ public class MainActivity extends Activity {
     private void openTab(int index) {
         tab = index;
         navigation.removeAllViews();
-        for (int i = 0; i < tabs.length; i++) {
-            final int selected = i;
-            Button b = button(tabs[i]);
-            b.setBackground(background(i == tab ? GREEN : PANEL_2, 11));
-            b.setTextColor(i == tab ? BG : FG);
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(43));
-            p.rightMargin = dp(7);
+        String[] navLabels = {"⌂  Start", "◉  Sensoren", "▤  Diagnose"};
+        for (int i = 0; i < 3; i++) {
+            final int choice = i;
+            Button b = button(navLabels[i]);
+            b.setTextSize(12);
+            b.setTextColor(i == index ? BG : SECONDARY);
+            b.setBackground(background(i == index ? GREEN : PANEL, 12));
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(47), 1f);
+            p.setMargins(dp(2), 0, dp(2), 0);
             navigation.addView(b, p);
-            b.setOnClickListener(v -> openTab(selected));
+            b.setOnClickListener(v -> {
+                openTab(choice);
+                if (mainScroll != null) mainScroll.scrollTo(0, 0);
+            });
         }
-        content.removeAllViews();
-        String[] names = {"Auf einen Blick", "Sensoren & Antrieb", "Technische Diagnose", "WLAN & Firmware"};
-        String[] descriptions = {
-            "Die wichtigsten Werte ohne Registeradressen",
-            "Unkalibrierte Rohwerte der Originalsteuerung",
-            "SWD, Datenqualität und erweiterte Rohdaten",
-            "ESP-Adresse, Heimnetz und ESP32-OTA"
+        if (settingsButton != null)
+            settingsButton.setTextColor(index == 3 ? GREEN : FG);
+        String[] titles = {"Dein Roboter", "Sensoren", "Diagnose", "Einstellungen"};
+        String[] sub = {
+            "Live-Übersicht  ·  Daten direkt vom ESP32",
+            "Messwerte der originalen Steuerung",
+            "Technische Details & Fehleranalyse",
+            "WLAN, Verbindung und Firmwareupdate"
         };
-        heading.setText(names[tab]);
-        subtitle.setText(descriptions[tab]);
+        heading.setText(titles[index]);
+        subtitle.setText(sub[index]);
+        renderContent();
+        if (mainScroll != null) mainScroll.scrollTo(0, 0);
+    }
+
+    private void renderContent() {
+        if (content == null) return;
+        int y = mainScroll != null ? mainScroll.getScrollY() : 0;
+        content.removeAllViews();
         if (tab == 0) overview();
         if (tab == 1) sensors();
         if (tab == 2) diagnostics();
         if (tab == 3) settings();
+        if (mainScroll != null) mainScroll.post(() -> mainScroll.scrollTo(0, y));
     }
+
+    private LinearLayout statTile(String heading, String amount, String foot) {
+        LinearLayout tile = vertical();
+        tile.setPadding(dp(13), dp(14), dp(12), dp(12));
+        tile.setBackground(background(PANEL_2, 13));
+        TextView label = text(heading.toUpperCase(Locale.ROOT), 11, SECONDARY, true);
+        spaced(tile, label, 9);
+        TextView number = text(amount, 22, FG, true);
+        spaced(tile, number, 4);
+        tile.addView(text(foot, 11, SECONDARY, false));
+        return tile;
+    }
+
     private void overview() {
-        LinearLayout state = card("Verbindungsstatus");
-        if (current == null) {
-            info(state, "Noch keine Messwerte. Die App versucht, den ESP32 über WLAN zu erreichen.");
-        } else if (valid()) {
-            TextView ok = text("SWD-Daten verfügbar", 20, GREEN, true);
-            spaced(state, ok, 7);
-            line(state, "Letzte Messung", numeric(current, "sample_age_ms") + " ms");
-        } else {
-            TextView bad = text("Keine gültigen SWD-Daten", 19, AMBER, true);
-            spaced(state, bad, 6);
-            info(state, "Der ESP32 kann erreichbar sein, auch wenn der GD32 nicht ausgelesen wird.");
-            line(state, "Diagnosestatus", current.optString("status", "unbekannt"));
-        }
+        LinearLayout hero = card(null);
+        TextView overline = text("LIVE-VERBINDUNG", 11, SECONDARY, true);
+        spaced(hero, overline, 11);
+        boolean alive = valid();
+        TextView state = text(alive ? "●  Verbunden" : "●  Keine Live-Daten",
+                24, alive ? GREEN : AMBER, true);
+        spaced(hero, state, 9);
+        info(hero, alive ?
+                "GD32 über ESP32-SWD erreichbar. Letzte Messung: " +
+                numeric(current, "sample_age_ms") + " ms." :
+                "ESP32-Verbindung oder SWD-Messung noch nicht bestätigt.");
+        if (current != null && !alive)
+            line(hero, "Diagnosecode", current.optString("status", "nicht verfügbar"));
         if (current != null && current.optBoolean("openocd_connected", false))
-            info(state, "OpenOCD greift gerade auf SWD zu. Die interne Telemetrie pausiert.");
+            info(hero, "OpenOCD nutzt SWD gerade exklusiv.");
 
-        LinearLayout battery = card("Akku & Laden");
+        LinearLayout battery = card("AKKU");
         JSONObject b = section("battery");
-        if (valid() && b != null && b.optInt("percent_reported", -1) >= 0
-                && b.optInt("percent_reported", -1) <= 100) {
-            int pct = b.optInt("percent_reported");
-            TextView big = text(pct + " %", 30, GREEN, true);
-            spaced(battery, big, 8);
-            ProgressBar p = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-            p.setMax(100);
-            p.setProgress(pct);
-            p.setProgressTintList(android.content.res.ColorStateList.valueOf(GREEN));
-            spaced(battery, p, 9);
-            info(battery, "Ladestand laut Original-Firmware. Kein selbst berechneter Messwert.");
-        } else info(battery, "Ladestand derzeit nicht verfügbar.");
-        line(battery, "Akku-ADC", raw(b, "adc"));
-        line(battery, "Lade-ADC", raw(b, "charge_adc"));
+        int charge = valid() && b != null ? b.optInt("percent_reported", -1) : -1;
+        if (charge > 100 || charge < 0) charge = -1;
+        TextView amount = text(charge >= 0 ? (charge + " %") : "— %", 39, FG, true);
+        spaced(battery, amount, 10);
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(charge >= 0 ? charge : 0);
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(GREEN));
+        bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(PANEL_2));
+        spaced(battery, bar, 9);
+        info(battery, "Ladestand laut Original-Firmware");
+        line(battery, "Batterie ADC", raw(b, "adc"));
+        line(battery, "Laden ADC", raw(b, "charge_adc"));
 
-        LinearLayout movement = card("Fahrwerk");
+        LinearLayout drive = card("RADENCODER");
         JSONObject wheel = section("wheel");
-        line(movement, "Rad links", value(wheel, "left_ticks") + " Ticks");
-        line(movement, "Rad rechts", value(wheel, "right_ticks") + " Ticks");
-        JSONObject st = section("state");
-        line(movement, "Fahrmodus-Code", value(st, "run_model"));
-        info(movement, "Die Codebedeutung ist noch nicht bestätigt. Die Ticks sind keine Strecke in Metern.");
+        LinearLayout wheelRow = horizontal();
+        LinearLayout l = statTile("Links", value(wheel, "left_ticks"), "Encoder-Ticks");
+        LinearLayout r = statTile("Rechts", value(wheel, "right_ticks"), "Encoder-Ticks");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+        lp.rightMargin = dp(8);
+        wheelRow.addView(l, lp);
+        wheelRow.addView(r, new LinearLayout.LayoutParams(0, -2, 1f));
+        spaced(drive, wheelRow, 12);
+        line(drive, "Fahrmodus (OEM-Code)", value(section("state"), "run_model"));
+        info(drive, "Keine berechnete Strecke: Encoder-Skalierung noch nicht kalibriert.");
 
-        LinearLayout sensors = card("Hindernissensoren");
+        LinearLayout sensorsCard = card("HINDERNISSENSOREN");
         JSONObject obs = section("obstacle_adc");
-        line(sensors, "Links", raw(obs, "left"));
-        line(sensors, "Vorne", raw(obs, "front"));
-        line(sensors, "Rechts", raw(obs, "right"));
-        info(sensors, "ADC-Rohwerte: keine bestätigten Abstandswerte.");
+        LinearLayout row = horizontal();
+        LinearLayout.LayoutParams a = new LinearLayout.LayoutParams(0, -2, 1f);
+        a.rightMargin = dp(5);
+        row.addView(statTile("Links", value(obs, "left"), "ADC"), a);
+        LinearLayout.LayoutParams m = new LinearLayout.LayoutParams(0, -2, 1f);
+        m.rightMargin = dp(5);
+        row.addView(statTile("Vorne", value(obs, "front"), "ADC"), m);
+        row.addView(statTile("Rechts", value(obs, "right"), "ADC"),
+                new LinearLayout.LayoutParams(0, -2, 1f));
+        spaced(sensorsCard, row, 12);
+        info(sensorsCard, "Rohwerte, noch keine kalibrierten Abstände.");
+
+        Button more = button("Alle Sensoren ansehen");
+        spaced(sensorsCard, more, 2);
+        more.setOnClickListener(v -> openTab(1));
     }
     private void sensors() {
         if (!valid()) {
@@ -612,7 +668,7 @@ public class MainActivity extends Activity {
                             && result.optLong("sample_age_ms", -1) < 5000;
                     updateBanner("ESP " + address + " · " +
                         (good ? "SWD-Daten verfügbar" : "SWD-Daten nicht gültig"), good);
-                    if (tab != 3) openTab(tab);
+                    if (tab != 3) renderContent();
                 });
             } catch (Exception problem) {
                 final String message = problem.getMessage();
