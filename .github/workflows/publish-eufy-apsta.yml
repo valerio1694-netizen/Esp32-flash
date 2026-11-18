@@ -1,0 +1,45 @@
+name: Publish Eufy AP+STA OTA bundle
+on:
+  push:
+    branches:
+      - feature/eufy-wroom-ota
+    paths:
+      - ".github/workflows/publish-eufy-apsta.yml"
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified ESP32 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 44359539774 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name Eufy-WROOM-OTA-TELEMETRY \
+            --dir dist
+          test -s dist/Eufy-WROOM-OTA-app-only.bin
+          test -s dist/wifi-credentials.txt
+          echo "6685a7bd598f1b04802da395b25d3c172f69eb94e74d6f5a3f1acda0099be391  dist/Eufy-WROOM-OTA-app-only.bin" | sha256sum -c -
+      - name: Publish stable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="eufy-apsta-peng-20261118"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "Eufy 15C – AP+STA OTA preview" \
+              --notes "ESP32-WROOM OTA application image and build-generated AP password. TEST BUILD. For an existing compatible OTA partition table only, do NOT flash app-only.bin at 0x0. Use LAN-local Wi-Fi only." \
+              --prerelease
+          fi
+          gh release upload "$tag" \
+            dist/Eufy-WROOM-OTA-app-only.bin \
+            dist/wifi-credentials.txt \
+            --clobber
