@@ -34,6 +34,11 @@ typedef struct {
     uint16_t left_window, right_window;
     uint16_t left_last_window, right_last_window;
     uint16_t left_current_adc, right_current_adc;
+    uint16_t battery_adc, charge_adc;
+    uint8_t battery_percent_reported, robot_status, run_model;
+    uint16_t obstacle_l, obstacle_f, obstacle_r;
+    uint16_t cliff_l, cliff_f, cliff_r;
+    uint16_t brush_main_adc, brush_l_adc, brush_r_adc;
     uint32_t pwm_l_pos, pwm_l_neg, pwm_r_pos, pwm_r_neg, brush_pwm;
     char status[36];
 } eufy_data_t;
@@ -166,10 +171,12 @@ void eufy_monitor_poll(void) {
         swd_ready = true;
     }
 
-    uint32_t wheels[4], windows[1], currents[3], pwm[4], brush[1];
+    uint32_t wheels[4], windows[1], analog[8], status_word[1], battery_state[1], pwm[4], brush[1];
     if (!read_words(0x20000098U, 4, wheels) ||
         !read_words(0x20000138U, 1, windows) ||
-        !read_words(0x200006B4U, 3, currents) ||
+        !read_words(0x200006B4U, 8, analog) ||
+        !read_words(0x20000394U, 1, status_word) ||
+        !read_words(0x200001D8U, 1, battery_state) ||
         !read_words(0x40000434U, 4, pwm) ||
         !read_words(0x40012C38U, 1, brush)) {
         swd_ready = false;
@@ -187,8 +194,22 @@ void eufy_monitor_poll(void) {
     latest.right_ticks = (int32_t)wheels[3];
     latest.right_last_window = windows[0] & 0xffffU;
     latest.left_last_window = windows[0] >> 16;
-    latest.right_current_adc = currents[0] & 0xffffU;
-    latest.left_current_adc = currents[2] >> 16;
+    latest.right_current_adc = analog[0] & 0xffffU;
+    latest.left_current_adc = analog[2] >> 16;
+    latest.cliff_l = analog[0] >> 16;  // 0x200006B6
+    latest.cliff_r = analog[1] & 0xffffU; // 0x200006B8
+    latest.brush_r_adc = analog[1] >> 16; // 0x200006BA
+    latest.brush_main_adc = analog[2] & 0xffffU; // 0x200006BC
+    latest.battery_adc = analog[3] & 0xffffU; // 0x200006C0
+    latest.cliff_f = analog[3] >> 16; // 0x200006C2
+    latest.obstacle_l = analog[4] & 0xffffU; // 0x200006C4
+    latest.obstacle_f = analog[4] >> 16; // 0x200006C6
+    latest.obstacle_r = analog[5] & 0xffffU; // 0x200006C8
+    latest.brush_l_adc = analog[5] >> 16; // 0x200006CA
+    latest.charge_adc = analog[6] & 0xffffU; // 0x200006CC
+    latest.robot_status = (status_word[0] >> 8) & 0xffU; // 0x20000395
+    latest.run_model = (status_word[0] >> 16) & 0xffU; // 0x20000396
+    latest.battery_percent_reported = (battery_state[0] >> 16) & 0xffU; // 0x200001DA
     latest.pwm_l_pos = pwm[0]; latest.pwm_l_neg = pwm[1];
     latest.pwm_r_pos = pwm[2]; latest.pwm_r_neg = pwm[3];
     latest.brush_pwm = brush[0];
@@ -232,7 +253,7 @@ static void eufy_http_task(void *arg) {
         portEXIT_CRITICAL(&latest_mux);
         int64_t age_ms = s.updated_us
             ? (esp_timer_get_time() - s.updated_us) / 1000LL : -1;
-        char payload[896];
+        char payload[1300];
         int pn = snprintf(payload, sizeof(payload),
             "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
             "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
@@ -242,6 +263,11 @@ static void eufy_http_task(void *arg) {
             "\"left_current_adc\":%u,\"right_current_adc\":%u},"
             "\"pwm_raw\":{\"left_positive\":%lu,\"left_negative\":%lu,"
             "\"right_positive\":%lu,\"right_negative\":%lu,\"brush\":%lu},"
+            "\"battery\":{\"adc\":%u,\"charge_adc\":%u,\"percent_reported\":%u},"
+            "\"state\":{\"robot_status\":%u,\"run_model\":%u},"
+            "\"obstacle_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
+            "\"cliff_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
+            "\"brush_adc\":{\"main\":%u,\"left\":%u,\"right\":%u},"
             "\"units\":\"ticks_and_raw_register_values\","
             "\"mode\":\"read_only_swd\"}\n",
             s.status, s.valid ? "true" : "false",
@@ -252,7 +278,12 @@ static void eufy_http_task(void *arg) {
             s.left_current_adc, s.right_current_adc,
             (unsigned long)s.pwm_l_pos, (unsigned long)s.pwm_l_neg,
             (unsigned long)s.pwm_r_pos, (unsigned long)s.pwm_r_neg,
-            (unsigned long)s.brush_pwm);
+            (unsigned long)s.brush_pwm,
+            s.battery_adc, s.charge_adc, s.battery_percent_reported,
+            s.robot_status, s.run_model,
+            s.obstacle_l, s.obstacle_f, s.obstacle_r,
+            s.cliff_l, s.cliff_f, s.cliff_r,
+            s.brush_main_adc, s.brush_l_adc, s.brush_r_adc);
         if (pn > 0 && pn < sizeof(payload)) {
             char head[180];
             int hn = snprintf(head, sizeof(head),
