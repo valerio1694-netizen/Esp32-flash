@@ -12,8 +12,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include "esp_http_server.h"
 #include <esp_timer.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -289,150 +288,132 @@ void eufy_monitor_poll(void) {
     portEXIT_CRITICAL(&latest_mux);
 }
 
-static void eufy_http_task(void *arg) {
-    (void)arg;
-    int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listener < 0) { vTaskDelete(NULL); return; }
-    int opt = 1;
-    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(EUFY_HTTP_PORT),
-        .sin_addr.s_addr = INADDR_ANY,
-    };
-    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
-        listen(listener, 3) < 0) {
-        printf("eufy monitor: HTTP bind/listen failed (%d)\n", errno);
-        close(listener); vTaskDelete(NULL); return;
-    }
-    /* Allocate the large HTTP JSON buffer on heap, not the FreeRTOS task stack.
-       Previous 3200-byte local array in a 4096-byte task could exhaust stack
-       inside snprintf/socket code, dropping the TCP connection. */
+/* ESP-IDF HTTP server, separate from OTA server (port 8081).
+   Using the built-in HTTP parser avoids partial recv(), manual Content-Length
+   mistakes and aborted TCP sessions. A dedicated HTTP server task avoids
+   occupying the CMSIS-DAP/SWD polling task. */
+static esp_err_t eufy_health_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, "{\"http\":true,\"service\":\"telemetry\"}");
+}
+static esp_err_t eufy_telemetry_handler(httpd_req_t *req) {
+    /* No SWD access in the HTTP task. Read the latest snapshot only. */
+    eufy_data_t s;
+    portENTER_CRITICAL(&latest_mux);
+    s = latest;
+    portEXIT_CRITICAL(&latest_mux);
+    int64_t age_ms = s.updated_us
+        ? (esp_timer_get_time() - s.updated_us) / 1000LL : -1;
     const size_t payload_cap = 4096;
     char *payload = malloc(payload_cap);
-    if (!payload) {
-        printf("eufy monitor: out of heap for HTTP response\n");
-        close(listener);
-        vTaskDelete(NULL);
-        return;
+    if (payload == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                  "Not enough memory for telemetry");
     }
-    printf("eufy monitor: http://<esp-ip>:%d/telemetry\n", EUFY_HTTP_PORT);
-    while (true) {
-        int fd = accept(listener, NULL, NULL);
-        if (fd < 0) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
-        struct timeval tv = { .tv_sec=1, .tv_usec=0 };
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        char req[192] = {0};
-        int rn = recv(fd, req, sizeof(req)-1, 0);
-        if (rn > 0 && strncmp(req, "GET /health ", 12) == 0) {
-            /* Independent HTTP probe: proves the server task is alive
-               even when SWD cannot communicate with the GD32. */
-            static const char health[] =
-                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
-                "Content-Length: 13\r\nConnection: close\r\n\r\n"
-                "{\"http\":true}";
-            send(fd, health, sizeof(health)-1, 0);
-            close(fd);
-            continue;
-        }
-        if (rn <= 0 || (strncmp(req, "GET /telemetry ", 15) != 0 &&
-                        strncmp(req, "GET / ", 6) != 0)) {
-            const char *error = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-            send(fd, error, strlen(error), 0);
-            close(fd); continue;
-        }
-        eufy_data_t s;
-        portENTER_CRITICAL(&latest_mux);
-        s = latest;
-        portEXIT_CRITICAL(&latest_mux);
-        int64_t age_ms = s.updated_us
-            ? (esp_timer_get_time() - s.updated_us) / 1000LL : -1;
-        int pn = snprintf(payload, payload_cap,
-            "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
-            "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
-            "\"wheel\":{\"left_ticks\":%ld,\"right_ticks\":%ld,"
-            "\"left_window\":%u,\"right_window\":%u,"
-            "\"left_last_window\":%u,\"right_last_window\":%u,"
-            "\"left_current_adc\":%u,\"right_current_adc\":%u},"
-            "\"pwm_raw\":{\"left_positive\":%lu,\"left_negative\":%lu,"
-            "\"right_positive\":%lu,\"right_negative\":%lu,\"brush\":%lu},"
-            "\"battery\":{\"adc\":%u,\"charge_adc\":%u,\"percent_reported\":%u},"
-            "\"state\":{\"robot_status\":%u,\"run_model\":%u},"
-            "\"obstacle_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
-            "\"cliff_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
-            "\"brush_adc\":{\"main\":%u,\"left\":%u,\"right\":%u},"
-            "\"units\":\"ticks_and_raw_register_values\","
-            "\"mode\":\"read_only_swd\","
-            "\"diagnostics\":{\"valid\":%s,\"run_time_raw\":%u,"
-            "\"run_time_1_raw\":%u,\"total_run_time_raw\":%lu,"
-            "\"change_time_raw\":%lu,\"dock_time_raw\":%u,"
-            "\"work_l_raw\":%u,\"dock_l_raw\":%u,"
-            "\"stop_time_raw\":%u,\"stop_time_1_raw\":%u,"
-            "\"wall_count_raw\":%lu,\"wall_count_1_raw\":%lu,"
-            "\"wall_flag_raw\":%u,\"fan_level_raw\":%u,"
-            "\"fan_mode_raw\":%u,\"fan_pwm_raw\":%lu,"
-            "\"power_boost_raw\":%u,\"remote_wall_follow_raw\":%u,"
-            "\"remote_spiral_raw\":%lu,\"fs_raw\":%u,"
-            "\"diag_213_first_raw\":%u,\"diag_213_second_raw\":%u,"
-            "\"robot_flags_raw\":%lu,\"charge_counter_raw\":%u,"
-            "\"charge_control_state_raw\":%u,\"charge_activity_flag_raw\":%u},"
-            "\"gpio_inputs\":{\"valid\":%s,\"A\":%u,\"B\":%u,"
-            "\"C\":%u,\"D\":%u,\"E\":%u},"
-            "\"bumper\":{\"channels_mapped\":false,\"wall_bump_count_raw\":%u,"
-            "\"reason\":\"individual_pins_unverified\"}}\n",
-            s.status, s.valid ? "true" : "false",
-            s.host_connected ? "true" : "false",
-            (long long)age_ms, (unsigned long)s.errors, (unsigned long)s.dpidr,
-            (long)s.left_ticks, (long)s.right_ticks, s.left_window, s.right_window,
-            s.left_last_window, s.right_last_window,
-            s.left_current_adc, s.right_current_adc,
-            (unsigned long)s.pwm_l_pos, (unsigned long)s.pwm_l_neg,
-            (unsigned long)s.pwm_r_pos, (unsigned long)s.pwm_r_neg,
-            (unsigned long)s.brush_pwm,
-            s.battery_adc, s.charge_adc, s.battery_percent_reported,
-            s.robot_status, s.run_model,
-            s.obstacle_l, s.obstacle_f, s.obstacle_r,
-            s.cliff_l, s.cliff_f, s.cliff_r,
-            s.brush_main_adc, s.brush_l_adc, s.brush_r_adc,
-            s.diagnostics_valid ? "true" : "false",
-            s.run_time, s.run_time_1, (unsigned long)s.total_run_time,
-            (unsigned long)s.change_time, s.dock_time, s.work_l, s.dock_l,
-            s.stop_time, s.stop_time_1, (unsigned long)s.wall_count,
-            (unsigned long)s.wall_count_1, s.wall_flag, s.fan_level,
-            s.fan_mode, (unsigned long)s.fan_pwm, s.power_boost,
-            s.remote_wall_follow, (unsigned long)s.remote_spiral_raw,
-            s.fs_raw, s.diagnostic_213_a, s.diagnostic_213_b,
-            (unsigned long)s.robot_flags,
-            s.charge_counter, s.charge_control_state, s.charge_activity_flag,
-            s.gpio_valid ? "true" : "false",
-            s.gpio_idr[0], s.gpio_idr[1], s.gpio_idr[2],
-            s.gpio_idr[3], s.gpio_idr[4], s.wall_bump_count);
-        if (pn > 0 && (size_t)pn < payload_cap) {
-            char head[180];
-            int hn = snprintf(head, sizeof(head),
-                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\nContent-Length: %d\r\n"
-                "Connection: close\r\n\r\n", pn);
-            if (hn > 0 && (size_t)hn < sizeof(head)) {
-                send(fd, head, hn, 0);
-                size_t sent = 0;
-                while (sent < (size_t)pn) {
-                    int n = send(fd, payload + sent, (size_t)pn - sent, 0);
-                    if (n <= 0) break;
-                    sent += (size_t)n;
-                }
-            }
-        } else {
-            static const char error[] =
-                "HTTP/1.0 500 Internal Server Error\r\nContent-Length: 0\r\n"
-                "Connection: close\r\n\r\n";
-            send(fd, error, sizeof(error)-1, 0);
-            printf("eufy monitor: JSON overflow/format error (%d)\n", pn);
-        }
-        close(fd);
+    int pn = snprintf(payload, payload_cap,
+        "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
+        "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
+        "\"wheel\":{\"left_ticks\":%ld,\"right_ticks\":%ld,"
+        "\"left_window\":%u,\"right_window\":%u,"
+        "\"left_last_window\":%u,\"right_last_window\":%u,"
+        "\"left_current_adc\":%u,\"right_current_adc\":%u},"
+        "\"pwm_raw\":{\"left_positive\":%lu,\"left_negative\":%lu,"
+        "\"right_positive\":%lu,\"right_negative\":%lu,\"brush\":%lu},"
+        "\"battery\":{\"adc\":%u,\"charge_adc\":%u,\"percent_reported\":%u},"
+        "\"state\":{\"robot_status\":%u,\"run_model\":%u},"
+        "\"obstacle_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
+        "\"cliff_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
+        "\"brush_adc\":{\"main\":%u,\"left\":%u,\"right\":%u},"
+        "\"units\":\"ticks_and_raw_register_values\","
+        "\"mode\":\"read_only_swd\","
+        "\"diagnostics\":{\"valid\":%s,\"run_time_raw\":%u,"
+        "\"run_time_1_raw\":%u,\"total_run_time_raw\":%lu,"
+        "\"change_time_raw\":%lu,\"dock_time_raw\":%u,"
+        "\"work_l_raw\":%u,\"dock_l_raw\":%u,"
+        "\"stop_time_raw\":%u,\"stop_time_1_raw\":%u,"
+        "\"wall_count_raw\":%lu,\"wall_count_1_raw\":%lu,"
+        "\"wall_flag_raw\":%u,\"fan_level_raw\":%u,"
+        "\"fan_mode_raw\":%u,\"fan_pwm_raw\":%lu,"
+        "\"power_boost_raw\":%u,\"remote_wall_follow_raw\":%u,"
+        "\"remote_spiral_raw\":%lu,\"fs_raw\":%u,"
+        "\"diag_213_first_raw\":%u,\"diag_213_second_raw\":%u,"
+        "\"robot_flags_raw\":%lu,\"charge_counter_raw\":%u,"
+        "\"charge_control_state_raw\":%u,\"charge_activity_flag_raw\":%u},"
+        "\"gpio_inputs\":{\"valid\":%s,\"A\":%u,\"B\":%u,"
+        "\"C\":%u,\"D\":%u,\"E\":%u},"
+        "\"bumper\":{\"channels_mapped\":false,\"wall_bump_count_raw\":%u,"
+        "\"reason\":\"individual_pins_unverified\"}}\n",
+        s.status, s.valid ? "true" : "false",
+        s.host_connected ? "true" : "false",
+        (long long)age_ms, (unsigned long)s.errors, (unsigned long)s.dpidr,
+        (long)s.left_ticks, (long)s.right_ticks, s.left_window, s.right_window,
+        s.left_last_window, s.right_last_window,
+        s.left_current_adc, s.right_current_adc,
+        (unsigned long)s.pwm_l_pos, (unsigned long)s.pwm_l_neg,
+        (unsigned long)s.pwm_r_pos, (unsigned long)s.pwm_r_neg,
+        (unsigned long)s.brush_pwm,
+        s.battery_adc, s.charge_adc, s.battery_percent_reported,
+        s.robot_status, s.run_model,
+        s.obstacle_l, s.obstacle_f, s.obstacle_r,
+        s.cliff_l, s.cliff_f, s.cliff_r,
+        s.brush_main_adc, s.brush_l_adc, s.brush_r_adc,
+        s.diagnostics_valid ? "true" : "false",
+        s.run_time, s.run_time_1, (unsigned long)s.total_run_time,
+        (unsigned long)s.change_time, s.dock_time, s.work_l, s.dock_l,
+        s.stop_time, s.stop_time_1, (unsigned long)s.wall_count,
+        (unsigned long)s.wall_count_1, s.wall_flag, s.fan_level,
+        s.fan_mode, (unsigned long)s.fan_pwm, s.power_boost,
+        s.remote_wall_follow, (unsigned long)s.remote_spiral_raw,
+        s.fs_raw, s.diagnostic_213_a, s.diagnostic_213_b,
+        (unsigned long)s.robot_flags,
+        s.charge_counter, s.charge_control_state, s.charge_activity_flag,
+        s.gpio_valid ? "true" : "false",
+        s.gpio_idr[0], s.gpio_idr[1], s.gpio_idr[2],
+        s.gpio_idr[3], s.gpio_idr[4], s.wall_bump_count);
+    esp_err_t err;
+    if (pn < 1 || (size_t)pn >= payload_cap) {
+        printf("eufy monitor: failed JSON formatting (length=%d)\n", pn);
+        err = httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                  "Telemetry JSON buffer error");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        err = httpd_resp_send(req, payload, pn);
     }
+    free(payload);
+    return err;
 }
 void eufy_monitor_server_start(void) {
-    if (xTaskCreate(eufy_http_task, "eufy_http", 8192, NULL, 3, NULL) != pdPASS)
-        printf("eufy monitor: HTTP task creation failed\n");
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port = EUFY_HTTP_PORT;
+    /* The OTA httpd (8081) owns the default ctrl_port=32768. */
+    cfg.ctrl_port = 32769;
+    cfg.stack_size = 8192;
+    cfg.max_uri_handlers = 4;
+    cfg.lru_purge_enable = true;
+    httpd_handle_t server = NULL;
+    esp_err_t err = httpd_start(&server, &cfg);
+    if (err != ESP_OK) {
+        printf("eufy monitor: HTTP server start failed (%s)\n",
+               esp_err_to_name(err));
+        return;
+    }
+    httpd_uri_t telem = {
+        .uri="/telemetry", .method=HTTP_GET, .handler=eufy_telemetry_handler
+    };
+    httpd_uri_t health = {
+        .uri="/health", .method=HTTP_GET, .handler=eufy_health_handler
+    };
+    httpd_uri_t root = {
+        .uri="/", .method=HTTP_GET, .handler=eufy_telemetry_handler
+    };
+    esp_err_t a = httpd_register_uri_handler(server, &telem);
+    esp_err_t b = httpd_register_uri_handler(server, &health);
+    esp_err_t c = httpd_register_uri_handler(server, &root);
+    if (a != ESP_OK || b != ESP_OK || c != ESP_OK)
+        printf("eufy monitor: HTTP URI registration failed\n");
+    else
+        printf("eufy monitor: HTTP port %d, /health, /telemetry\n", EUFY_HTTP_PORT);
 }
