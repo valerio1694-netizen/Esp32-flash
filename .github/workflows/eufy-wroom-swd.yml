@@ -123,6 +123,7 @@ jobs:
             0x1000 upstream/build/build_eufy_wroom/bootloader/bootloader.bin \
             0x8000 upstream/build/build_eufy_wroom/partition_table/partition-table.bin \
             0x10000 upstream/build/build_eufy_wroom/cmsis_dap_tcp_esp32.bin
+          cp eufy-wroom/Flash-COM10-Telemetry.ps1 dist/Flash-COM10-Telemetry.ps1
           cp upstream-commit.txt dist/upstream-commit.txt
           sha256sum dist/*.bin > dist/SHA256SUMS
           test -s dist/Eufy-WROOM-SWD-full.bin
