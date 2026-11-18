@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_netif_ip_addr.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
