@@ -31,6 +31,13 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.util.Enumeration;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Locale;
@@ -62,6 +69,7 @@ public class MainActivity extends Activity {
     private String lastMessage = "Noch keine Telemetrie empfangen";
     private boolean live = true, active = false, advanced = false;
     private int tab = 0;
+    private volatile long lastDiscoveryMs = 0;
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (live && tab != 3 && !busy.get()) refresh();
@@ -402,7 +410,10 @@ public class MainActivity extends Activity {
         hostEdit = field(currentHost, "ESP32-IP-Adresse", false);
         spaced(host, hostEdit, 10);
         Button saveHost = button("Adresse speichern & verbinden");
-        spaced(host, saveHost, 3);
+        spaced(host, saveHost, 7);
+        Button findHost = button("ESP automatisch finden");
+        spaced(host, findHost, 3);
+        findHost.setOnClickListener(v -> discoverFromButton());
         saveHost.setOnClickListener(v -> {
             currentHost = normalizeHost(hostEdit.getText().toString());
             getPreferences(MODE_PRIVATE).edit().putString("host", currentHost).apply();
@@ -477,41 +488,135 @@ public class MainActivity extends Activity {
             conn.disconnect();
         }
     }
+    // Passive signature check on the ESP OTA/status endpoint.
+    private static boolean isEufy(String host) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection)new URL("http://" + host + ":8081/status").openConnection();
+            c.setConnectTimeout(550);
+            c.setReadTimeout(750);
+            c.setUseCaches(false);
+            if (c.getResponseCode() != 200) return false;
+            JSONObject j = new JSONObject(new String(readAll(c.getInputStream()), StandardCharsets.UTF_8));
+            return j.optBoolean("ota", false)
+                && "/upload".equals(j.optString("upload_path", ""))
+                && "X-OTA-Token".equals(j.optString("auth", ""));
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+    // Current Wi-Fi interface subnet; do not scan cellular, VPN or the internet.
+    private String wifiPrefix() {
+        try {
+            NetworkInterface wlan = NetworkInterface.getByName("wlan0");
+            if (wlan == null || !wlan.isUp()) return null;
+            Enumeration<InetAddress> ips = wlan.getInetAddresses();
+            while (ips.hasMoreElements()) {
+                InetAddress a = ips.nextElement();
+                if (a instanceof Inet4Address && a.isSiteLocalAddress()) {
+                    String ip = a.getHostAddress();
+                    return ip.substring(0, ip.lastIndexOf('.') + 1);
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+    private String findEspOnWifi() {
+        String prefix = wifiPrefix();
+        if (prefix == null) return null;
+        if (currentHost.startsWith(prefix) && isEufy(currentHost)) return currentHost;
+        ExecutorService pool = Executors.newFixedThreadPool(20);
+        ExecutorCompletionService<String> results = new ExecutorCompletionService<>(pool);
+        int count = 0;
+        try {
+            for (int i = 1; i <= 254; i++) {
+                final String candidate = prefix + i;
+                if (candidate.equals(currentHost)) continue;
+                results.submit(() -> isEufy(candidate) ? candidate : null);
+                count++;
+            }
+            long deadline = System.currentTimeMillis() + 11000;
+            for (int i = 0; i < count; i++) {
+                long remain = deadline - System.currentTimeMillis();
+                if (remain <= 0) break;
+                Future<String> done = results.poll(remain, TimeUnit.MILLISECONDS);
+                if (done == null) break;
+                String found = done.get();
+                if (found != null) return found;
+            }
+        } catch (Exception ignored) { 
+            // A disconnected Wi-Fi network yields no result; never change settings.
+        } finally {
+            pool.shutdownNow();
+        }
+        return null;
+    }
+    private void rememberHost(String ip) {
+        currentHost = ip;
+        getPreferences(MODE_PRIVATE).edit().putString("host", ip).apply();
+        if (hostEdit != null) hostEdit.setText(ip);
+    }
+    private void discoverFromButton() {
+        if (!busy.compareAndSet(false, true)) return;
+        updateBanner("Suche ESP im aktuellen WLAN …", false);
+        worker.execute(() -> {
+            try {
+                String found = findEspOnWifi();
+                runOnUiThread(() -> {
+                    if (found == null) updateBanner("ESP im aktuellen WLAN nicht gefunden", false);
+                    else {
+                        rememberHost(found);
+                        updateBanner("ESP gefunden: " + found, true);
+                    }
+                });
+            } finally { busy.set(false); }
+        });
+    }
+
     private void refresh() {
         if (!busy.compareAndSet(false, true)) return;
         final String ip = currentHost;
-        if (ip.isEmpty()) {
-            busy.set(false);
-            updateBanner("Bitte ESP32-Adresse eingeben", false);
-            return;
-        }
         worker.execute(() -> {
             try {
-                JSONObject data = new JSONObject(get(ip, 8080, "/telemetry"));
+                String selectedIp = ip;
+                JSONObject data;
+                try {
+                    data = new JSONObject(get(ip, 8080, "/telemetry"));
+                } catch (Exception initial) {
+                    boolean espAtOldAddress = isEufy(ip);
+                    if (espAtOldAddress) {
+                        throw new Exception("ESP-OTA erreichbar, Telemetrie antwortet nicht");
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now - lastDiscoveryMs < 60000) throw initial;
+                    lastDiscoveryMs = now;
+                    runOnUiThread(() -> updateBanner("Suche ESP automatisch im WLAN …", false));
+                    String found = findEspOnWifi();
+                    if (found == null) throw new Exception("ESP im aktuellen WLAN nicht gefunden");
+                    selectedIp = found;
+                    final String discovered = found;
+                    runOnUiThread(() -> rememberHost(discovered));
+                    try {
+                        data = new JSONObject(get(found, 8080, "/telemetry"));
+                    } catch (Exception noTelemetry) {
+                        throw new Exception("ESP " + found + " gefunden, aber Telemetrie antwortet nicht");
+                    }
+                }
+                final JSONObject result = data;
+                final String address = selectedIp;
                 runOnUiThread(() -> {
-                    current = data;
-                    String state = data.optBoolean("valid", false) ? "SWD verfügbar" :
-                            "ESP erreichbar · SWD: " + data.optString("status", "keine Daten");
-                    long age = data.optLong("sample_age_ms", -1);
-                    updateBanner(state + (age >= 0 ? " · " + age + " ms" : ""),
-                            data.optBoolean("valid", false) && age < 5000);
+                    current = result;
+                    boolean good = result.optBoolean("valid", false)
+                            && result.optLong("sample_age_ms", -1) < 5000;
+                    updateBanner("ESP " + address + " · " +
+                        (good ? "SWD-Daten verfügbar" : "SWD-Daten nicht gültig"), good);
                     if (tab != 3) openTab(tab);
                 });
             } catch (Exception problem) {
-                String diagnostic;
-                try {
-                    get(ip, 8080, "/health");
-                    diagnostic = "HTTP erreichbar, Telemetrie fehlgeschlagen: " + problem.getMessage();
-                } catch (Exception ignored) {
-                    try {
-                        get(ip, 8081, "/status");
-                        diagnostic = "ESP OTA erreichbar · Telemetrie-Server antwortet nicht";
-                    } catch (Exception unknown) {
-                        diagnostic = "ESP nicht erreichbar: " + problem.getClass().getSimpleName();
-                    }
-                }
-                final String msg = diagnostic;
-                runOnUiThread(() -> updateBanner(msg, false));
+                final String message = problem.getMessage();
+                runOnUiThread(() -> updateBanner(message, false));
             } finally {
                 busy.set(false);
             }
