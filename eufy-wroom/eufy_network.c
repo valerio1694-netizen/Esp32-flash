@@ -22,6 +22,8 @@
 #define NVS_NAMESPACE "eufy_sta"
 #define NVS_SSID "ssid"
 #define NVS_PASSWORD "password"
+#define AUTH_NAMESPACE "eufy_auth"
+#define AUTH_KEY "token"
 
 static const char *TAG = "eufy_network";
 static volatile bool connected = false;
@@ -41,6 +43,60 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *info = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "STA IP " IPSTR, IP2STR(&info->ip_info.ip));
     }
+}
+
+
+/* Keep OTA authorization available when the SoftAP is disabled in STA mode.
+   Credentials are stored only on the device (NVS), not in public source. */
+bool eufy_network_token_valid(const char *provided)
+{
+    if (provided == NULL || strlen(provided) < 8 || strlen(provided) > 63)
+        return false;
+    nvs_handle_t h;
+    if (nvs_open(AUTH_NAMESPACE, NVS_READONLY, &h) != ESP_OK)
+        return false;
+    char stored[65] = {0};
+    size_t len = sizeof(stored);
+    esp_err_t err = nvs_get_str(h, AUTH_KEY, stored, &len);
+    nvs_close(h);
+    if (err != ESP_OK) return false;
+    size_t got = strlen(provided), expected = strlen(stored);
+    if (got != expected) return false;
+    unsigned char difference = 0;
+    for (size_t i = 0; i < got; ++i)
+        difference |= (unsigned char)provided[i] ^ (unsigned char)stored[i];
+    memset(stored, 0, sizeof(stored));
+    return difference == 0;
+}
+
+static void ensure_ota_token(const char *ap_password)
+{
+    if (ap_password == NULL || strlen(ap_password) < 8 ||
+        strlen(ap_password) > 63) {
+        ESP_LOGE(TAG, "Cannot provision OTA token: no valid AP credential");
+        return;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(AUTH_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot open OTA token store: %s", esp_err_to_name(err));
+        return;
+    }
+    char existing[65] = {0};
+    size_t length = sizeof(existing);
+    err = nvs_get_str(h, AUTH_KEY, existing, &length);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = nvs_set_str(h, AUTH_KEY, ap_password);
+        if (err == ESP_OK) err = nvs_commit(h);
+        if (err != ESP_OK)
+            ESP_LOGE(TAG, "Cannot persist OTA token: %s", esp_err_to_name(err));
+        else
+            ESP_LOGI(TAG, "OTA token stored in NVS (value not logged)");
+    } else if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA token cannot be read: %s", esp_err_to_name(err));
+    }
+    memset(existing, 0, sizeof(existing));
+    nvs_close(h);
 }
 
 static void reconnect_task(void *arg)
@@ -169,6 +225,7 @@ void eufy_network_start(void)
         char ap_pass[65] = {0};
         memcpy(ap_ssid, current_ap.ap.ssid, 32);
         memcpy(ap_pass, current_ap.ap.password, 64);
+        ensure_ota_token(ap_pass);
         err = wifi_save_ap_config(ap_ssid, ap_pass, current_ap.ap.channel);
         if (err != ESP_OK)
             ESP_LOGW(TAG, "AP credential persist failed: %s", esp_err_to_name(err));
