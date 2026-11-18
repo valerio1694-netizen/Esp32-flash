@@ -6,6 +6,7 @@
  * Source: verified static OEM disassembly, see DIAGNOSE-ENCODER.md.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -304,6 +305,17 @@ static void eufy_http_task(void *arg) {
         printf("eufy monitor: HTTP bind/listen failed (%d)\n", errno);
         close(listener); vTaskDelete(NULL); return;
     }
+    /* Allocate the large HTTP JSON buffer on heap, not the FreeRTOS task stack.
+       Previous 3200-byte local array in a 4096-byte task could exhaust stack
+       inside snprintf/socket code, dropping the TCP connection. */
+    const size_t payload_cap = 4096;
+    char *payload = malloc(payload_cap);
+    if (!payload) {
+        printf("eufy monitor: out of heap for HTTP response\n");
+        close(listener);
+        vTaskDelete(NULL);
+        return;
+    }
     printf("eufy monitor: http://<esp-ip>:%d/telemetry\n", EUFY_HTTP_PORT);
     while (true) {
         int fd = accept(listener, NULL, NULL);
@@ -312,6 +324,17 @@ static void eufy_http_task(void *arg) {
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         char req[192] = {0};
         int rn = recv(fd, req, sizeof(req)-1, 0);
+        if (rn > 0 && strncmp(req, "GET /health ", 12) == 0) {
+            /* Independent HTTP probe: proves the server task is alive
+               even when SWD cannot communicate with the GD32. */
+            static const char health[] =
+                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
+                "Content-Length: 12\r\nConnection: close\r\n\r\n"
+                "{\"http\":true}";
+            send(fd, health, sizeof(health)-1, 0);
+            close(fd);
+            continue;
+        }
         if (rn <= 0 || (strncmp(req, "GET /telemetry ", 15) != 0 &&
                         strncmp(req, "GET / ", 6) != 0)) {
             const char *error = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
@@ -324,8 +347,7 @@ static void eufy_http_task(void *arg) {
         portEXIT_CRITICAL(&latest_mux);
         int64_t age_ms = s.updated_us
             ? (esp_timer_get_time() - s.updated_us) / 1000LL : -1;
-        char payload[3200];
-        int pn = snprintf(payload, sizeof(payload),
+        int pn = snprintf(payload, payload_cap,
             "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
             "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
             "\"wheel\":{\"left_ticks\":%ld,\"right_ticks\":%ld,"
@@ -385,19 +407,32 @@ static void eufy_http_task(void *arg) {
             s.gpio_valid ? "true" : "false",
             s.gpio_idr[0], s.gpio_idr[1], s.gpio_idr[2],
             s.gpio_idr[3], s.gpio_idr[4], s.wall_bump_count);
-        if (pn > 0 && pn < sizeof(payload)) {
+        if (pn > 0 && (size_t)pn < payload_cap) {
             char head[180];
             int hn = snprintf(head, sizeof(head),
                 "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n"
                 "Access-Control-Allow-Origin: *\r\nContent-Length: %d\r\n"
                 "Connection: close\r\n\r\n", pn);
-            if (hn > 0) send(fd, head, hn, 0);
-            send(fd, payload, pn, 0);
+            if (hn > 0 && (size_t)hn < sizeof(head)) {
+                send(fd, head, hn, 0);
+                size_t sent = 0;
+                while (sent < (size_t)pn) {
+                    int n = send(fd, payload + sent, (size_t)pn - sent, 0);
+                    if (n <= 0) break;
+                    sent += (size_t)n;
+                }
+            }
+        } else {
+            static const char error[] =
+                "HTTP/1.0 500 Internal Server Error\r\nContent-Length: 0\r\n"
+                "Connection: close\r\n\r\n";
+            send(fd, error, sizeof(error)-1, 0);
+            printf("eufy monitor: JSON overflow/format error (%d)\n", pn);
         }
         close(fd);
     }
 }
 void eufy_monitor_server_start(void) {
-    if (xTaskCreate(eufy_http_task, "eufy_http", 4096, NULL, 3, NULL) != pdPASS)
+    if (xTaskCreate(eufy_http_task, "eufy_http", 8192, NULL, 3, NULL) != pdPASS)
         printf("eufy monitor: HTTP task creation failed\n");
 }
