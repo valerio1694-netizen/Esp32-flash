@@ -200,6 +200,10 @@ function Worker {
         }
         $savedApPassword=Read-LocalSecret $LocalEspKey
         if (!$savedApPassword) { $savedApPassword=Get-SavedWLANKey $EspSSID }
+        # Prepare the Windows WLAN profiles ONLY inside the scheduled worker:
+        # recovery task is already armed before potentially disrupting Peng.
+        Set-WlanProfile $HomeSSID $pengPassword
+        if ($savedApPassword) { Set-WlanProfile $EspSSID $savedApPassword }
         $firmware=Write-Firmware
         $NewApPassword=Get-NewAPPassword
         Log 'Firmware bereit. Recovery-Task laeuft unabhaengig.'
@@ -327,10 +331,8 @@ function Bootstrap {
     if (!$espPass -or $espPass.Length -lt 8 -or $espPass.Length -gt 63) {
         throw 'ESP-AP-Passwort im Windows-Profil nicht lesbar. Kein WLAN-Wechsel.'
     }
-    # Make sure both saved profiles really contain the supplied credentials
-    # so the recovery task can connect to Peng even after a broken OTA.
-    Set-WlanProfile $HomeSSID $homePass
-    Set-WlanProfile $EspSSID $espPass
+    # Downloads and checksum validation happen while Peng is still active.
+    # WLAN profile changes happen only after the recovery task is armed.
     # Pruefsummen und Downloads VOR dem WLAN-Wechsel.
     Download-Firmware
     if (Get-ScheduledTask -TaskName $TaskWorker -ErrorAction SilentlyContinue) {
