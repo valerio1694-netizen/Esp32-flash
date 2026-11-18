@@ -10,7 +10,7 @@ def replace_once(old, new):
     n=s.count(old)
     if n != 1: raise SystemExit(f"Expected exactly one anchor, got {n}: {old[:90]!r}")
     s=s.replace(old,new)
-replace_once('#include "cmsis_dap_tcp.h"', '#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"')
+replace_once('#include "cmsis_dap_tcp.h"', '#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"\n#include "eufy_ota.h"')
 replace_once('int sel = select(fdmax + 1, &read_fds, NULL, NULL, NULL);',
 '''struct timeval poll_timeout = { .tv_sec = 0, .tv_usec = 200000 };
         int sel = select(fdmax + 1, &read_fds, NULL, NULL, &poll_timeout);
@@ -32,12 +32,13 @@ if m.count('#include "cmsis_dap_tcp.h"')!=1: raise SystemExit("main.c include mi
 m=m.replace('#include "cmsis_dap_tcp.h"','#include "cmsis_dap_tcp.h"\n#include "eufy_monitor.h"')
 key='    if(cmsis_dap_tcp_task_start() != pdPASS) {'
 if m.count(key)!=1: raise SystemExit("main.c init anchor missing")
-m=m.replace(key,'    eufy_monitor_server_start();\n\n'+key)
+m=m.replace(key,'    eufy_monitor_server_start();\n    eufy_ota_server_start();\n\n'+key)
 main.write_text(m)
 cm=root / "main" / "CMakeLists.txt"
 c=cm.read_text()
 key='    "cmsis_dap_tcp.c")'
 if c.count(key)!=1: raise SystemExit("CMakeLists anchor missing")
-c=c.replace(key,'    "cmsis_dap_tcp.c"\n    "eufy_monitor.c")')
+c=c.replace(key,'    "cmsis_dap_tcp.c"\n    "eufy_monitor.c"\n    "eufy_ota.c")')
+c=c.replace('"esp_timer" "esp_wifi"', '"esp_timer" "esp_wifi" "app_update" "esp_http_server"')
 cm.write_text(c)
 print("Eufy read-only monitor injected into CMSIS-DAP TCP owner task.")

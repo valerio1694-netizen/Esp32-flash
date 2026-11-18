@@ -40,6 +40,13 @@ typedef struct {
     uint16_t cliff_l, cliff_f, cliff_r;
     uint16_t brush_main_adc, brush_l_adc, brush_r_adc;
     uint32_t pwm_l_pos, pwm_l_neg, pwm_r_pos, pwm_r_neg, brush_pwm;
+    bool diagnostics_valid, gpio_valid;
+    uint32_t change_time, total_run_time, wall_count, wall_count_1, fan_pwm;
+    uint16_t run_time, run_time_1, stop_time, stop_time_1;
+    uint16_t dock_time, work_l, dock_l, fs_raw, diagnostic_213_a, diagnostic_213_b;
+    uint8_t wall_flag, fan_level, fan_mode, power_boost, remote_wall_follow;
+    uint32_t remote_spiral_raw, robot_flags;
+    uint16_t gpio_idr[5];
     char status[36];
 } eufy_data_t;
 static eufy_data_t latest = { .status = "initializing" };
@@ -184,7 +191,58 @@ void eufy_monitor_poll(void) {
         next_poll_us = now + EUFY_RETRY_MS * 1000LL;
         return;
     }
+    /* Extended OEM diagnostic items 202-219: read only, optional.
+       All addresses are backed by disassembly's diagnostic dispatcher.
+       Unmapped bumper bits remain explicitly unknown. */
+    uint32_t timer_words[8] = {0}, stop_words[2] = {0}, wall_words[2] = {0};
+    uint32_t fan_words[2] = {0}, wall_flag_words[2] = {0};
+    uint32_t fan_level_word[1] = {0}, fs_word[1] = {0};
+    uint32_t robot_flags[1] = {0}, change_time[1] = {0}, fan_pwm[1] = {0};
+    bool diag_ok =
+        read_words(0x20000390U, 8, timer_words) &&
+        read_words(0x20000598U, 2, stop_words) &&
+        read_words(0x20000638U, 2, wall_words) &&
+        read_words(0x20000610U, 2, wall_flag_words) &&
+        read_words(0x20000428U, 2, fan_words) &&
+        read_words(0x20000180U, 1, fan_level_word) &&
+        read_words(0x200003C4U, 1, fs_word) &&
+        read_words(0x20000024U, 1, robot_flags) &&
+        read_words(0x2000003CU, 1, change_time) &&
+        read_words(0x40012C3CU, 1, fan_pwm);
+    uint32_t gpio_inputs[5] = {0};
+    bool gpio_ok = true;
+    for (unsigned i = 0; i < 5; i++)
+        if (!read_words(0x40010808U + 0x400U*i, 1, &gpio_inputs[i]))
+            gpio_ok = false;
     portENTER_CRITICAL(&latest_mux);
+    latest.diagnostics_valid = diag_ok;
+    latest.gpio_valid = gpio_ok;
+    if (diag_ok) {
+        latest.run_time = (uint16_t)timer_words[3];
+        latest.run_time_1 = (uint16_t)(timer_words[3] >> 16);
+        latest.total_run_time = timer_words[0];
+        latest.dock_time = (uint16_t)timer_words[7];
+        latest.work_l = (uint16_t)(timer_words[4] >> 16);
+        latest.dock_l = (uint16_t)timer_words[5];
+        latest.stop_time = (uint16_t)(stop_words[0] >> 16);
+        latest.stop_time_1 = (uint16_t)stop_words[1];
+        latest.wall_count = wall_words[0];
+        latest.wall_count_1 = wall_words[1];
+        latest.wall_flag = (uint8_t)wall_flag_words[0];
+        latest.fan_level = (uint8_t)fan_level_word[0];
+        latest.fan_mode = (uint8_t)(status_word[0] >> 24);
+        latest.power_boost = (uint8_t)(fan_words[1] >> 16);
+        latest.remote_wall_follow = (uint8_t)(fan_words[1] >> 24);
+        latest.remote_spiral_raw = (uint8_t)(fan_words[0] >> 16);
+        latest.fs_raw = (uint16_t)fs_word[0];
+        latest.diagnostic_213_a = (uint16_t)(analog[6] >> 16);
+        latest.diagnostic_213_b = (uint16_t)wall_flag_words[1];
+        latest.change_time = change_time[0];
+        latest.fan_pwm = fan_pwm[0];
+        latest.robot_flags = robot_flags[0];
+    }
+    if (gpio_ok)
+        for (int i = 0; i < 5; i++) latest.gpio_idr[i] = (uint16_t)gpio_inputs[i];
     latest.valid = true;
     latest.dpidr = DP_ID_EXPECTED;
     latest.updated_us = esp_timer_get_time();
@@ -253,7 +311,7 @@ static void eufy_http_task(void *arg) {
         portEXIT_CRITICAL(&latest_mux);
         int64_t age_ms = s.updated_us
             ? (esp_timer_get_time() - s.updated_us) / 1000LL : -1;
-        char payload[1300];
+        char payload[3200];
         int pn = snprintf(payload, sizeof(payload),
             "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
             "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
@@ -269,7 +327,22 @@ static void eufy_http_task(void *arg) {
             "\"cliff_adc\":{\"left\":%u,\"front\":%u,\"right\":%u},"
             "\"brush_adc\":{\"main\":%u,\"left\":%u,\"right\":%u},"
             "\"units\":\"ticks_and_raw_register_values\","
-            "\"mode\":\"read_only_swd\"}\n",
+            "\"mode\":\"read_only_swd\","
+            "\"diagnostics\":{\"valid\":%s,\"run_time_raw\":%u,"
+            "\"run_time_1_raw\":%u,\"total_run_time_raw\":%lu,"
+            "\"change_time_raw\":%lu,\"dock_time_raw\":%u,"
+            "\"work_l_raw\":%u,\"dock_l_raw\":%u,"
+            "\"stop_time_raw\":%u,\"stop_time_1_raw\":%u,"
+            "\"wall_count_raw\":%lu,\"wall_count_1_raw\":%lu,"
+            "\"wall_flag_raw\":%u,\"fan_level_raw\":%u,"
+            "\"fan_mode_raw\":%u,\"fan_pwm_raw\":%lu,"
+            "\"power_boost_raw\":%u,\"remote_wall_follow_raw\":%u,"
+            "\"remote_spiral_raw\":%lu,\"fs_raw\":%u,"
+            "\"diag_213_first_raw\":%u,\"diag_213_second_raw\":%u,"
+            "\"robot_flags_raw\":%lu},"
+            "\"gpio_inputs\":{\"valid\":%s,\"A\":%u,\"B\":%u,"
+            "\"C\":%u,\"D\":%u,\"E\":%u},"
+            "\"bumper\":{\"mapped\":false,\"reason\":\"pin_mapping_unverified\"}}\n",
             s.status, s.valid ? "true" : "false",
             s.host_connected ? "true" : "false",
             (long long)age_ms, (unsigned long)s.errors, (unsigned long)s.dpidr,
@@ -283,7 +356,18 @@ static void eufy_http_task(void *arg) {
             s.robot_status, s.run_model,
             s.obstacle_l, s.obstacle_f, s.obstacle_r,
             s.cliff_l, s.cliff_f, s.cliff_r,
-            s.brush_main_adc, s.brush_l_adc, s.brush_r_adc);
+            s.brush_main_adc, s.brush_l_adc, s.brush_r_adc,
+            s.diagnostics_valid ? "true" : "false",
+            s.run_time, s.run_time_1, (unsigned long)s.total_run_time,
+            (unsigned long)s.change_time, s.dock_time, s.work_l, s.dock_l,
+            s.stop_time, s.stop_time_1, (unsigned long)s.wall_count,
+            (unsigned long)s.wall_count_1, s.wall_flag, s.fan_level,
+            s.fan_mode, (unsigned long)s.fan_pwm, s.power_boost,
+            s.remote_wall_follow, (unsigned long)s.remote_spiral_raw,
+            s.fs_raw, s.diagnostic_213_a, s.diagnostic_213_b,
+            (unsigned long)s.robot_flags, s.gpio_valid ? "true" : "false",
+            s.gpio_idr[0], s.gpio_idr[1], s.gpio_idr[2],
+            s.gpio_idr[3], s.gpio_idr[4]);
         if (pn > 0 && pn < sizeof(payload)) {
             char head[180];
             int hn = snprintf(head, sizeof(head),
