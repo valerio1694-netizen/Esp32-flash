@@ -8,7 +8,7 @@ on:
       - ".github/workflows/eufy-android.yml"
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   android-apk:
     runs-on: ubuntu-latest
@@ -41,3 +41,18 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
+
+      - name: Publish public APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp android/app/build/outputs/apk/debug/app-debug.apk Eufy-15C-Monitor.apk
+          if ! gh release view eufy-15c-monitor-preview >/dev/null 2>&1; then
+            gh release create eufy-15c-monitor-preview \
+              --target "$GITHUB_SHA" --title "Eufy 15C Monitor – Vorschau" \
+              --notes "Ungetestete Debug-APK. Zeigt die ESP32-SWD-Telemetrie an und erlaubt ESP32-OTA; keine GD32-Schreibbefehle." \
+              --prerelease
+          fi
+          gh release upload eufy-15c-monitor-preview Eufy-15C-Monitor.apk --clobber
