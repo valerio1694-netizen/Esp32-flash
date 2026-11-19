@@ -26,9 +26,12 @@ import android.widget.TextView;
 import org.json.JSONObject;
 import org.json.JSONArray;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.Inet4Address;
@@ -411,6 +414,13 @@ public class MainActivity extends Activity {
             JSONObject gpio = section("gpio_inputs");
             line(health, "GPIO-Abfrage", gpio != null && gpio.optBoolean("valid", false) ? "Gültig" : "Nicht bestätigt");
         }
+
+        LinearLayout swdCheck = card("Direkte SWD-Prüfung");
+        info(swdCheck, "Prüft den CMSIS-DAP-TCP-Zugang (Port 4441) und liest nur die Debug-Port-ID des GD32. Kein Reset, kein Flash, kein Anhalten der CPU.");
+        Button testSwd = button("SWD jetzt direkt prüfen");
+        spaced(swdCheck, testSwd, 3);
+        testSwd.setOnClickListener(v -> checkSwdDirect());
+
         LinearLayout commands = card("Erreichbarkeit prüfen");
         Button checkHttp = button("HTTP-Server /health");
         spaced(commands, checkHttp, 9);
@@ -675,6 +685,148 @@ public class MainActivity extends Activity {
             }
         });
     }
+
+    // CMSIS-DAP TCP framed protocol implemented by the pinned upstream firmware.
+    // Header: "DAP\0", uint16 payload length LE, type 1=request, type 2=response, reserved=0.
+    // Only safe CMSIS-DAP commands: Connect, Clock, TransferConfig, SWDConfig,
+    // SWJ line reset/mode switch, and DP IDCODE read (DP address 0).
+    // Never HALT, RESET, write the target, or access AP memory.
+    private static byte[] dapTcpCommand(DataInputStream input, OutputStream output,
+            byte... command) throws Exception {
+        if (command.length < 1 || command.length > 1024)
+            throw new Exception("Ungültige CMSIS-DAP-Befehlslänge");
+        byte[] header = new byte[] {
+            'D', 'A', 'P', 0, (byte) command.length,
+            (byte) (command.length >> 8), 1, 0
+        };
+        output.write(header);
+        output.write(command);
+        output.flush();
+
+        byte[] responseHeader = new byte[8];
+        input.readFully(responseHeader);
+        if (responseHeader[0] != 'D' || responseHeader[1] != 'A' ||
+                responseHeader[2] != 'P' || responseHeader[3] != 0 ||
+                responseHeader[6] != 2) {
+            throw new Exception("CMSIS-DAP: Ungültiger TCP-Antwortheader");
+        }
+        int size = (responseHeader[4] & 0xff) | ((responseHeader[5] & 0xff) << 8);
+        if (size < 2 || size > 1024)
+            throw new Exception("CMSIS-DAP: Ungültige Antwortlänge " + size);
+        byte[] response = new byte[size];
+        input.readFully(response);
+        if (response[0] != command[0])
+            throw new Exception("CMSIS-DAP: Falsche Befehlsantwort");
+        return response;
+    }
+
+    private static String swdAckName(int ack) {
+        switch (ack) {
+            case 1: return "OK";
+            case 2: return "WAIT (Ziel antwortet noch nicht)";
+            case 4: return "FAULT (SWD-Zugriff abgelehnt)";
+            case 7: return "NO-ACK (keine gültige SWD-Antwort)";
+            default: return "0x" + Integer.toHexString(ack);
+        }
+    }
+
+    private static String checkSwdCommands(String host) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, 4441), 3500);
+            socket.setSoTimeout(4000);
+            socket.setTcpNoDelay(true);
+            DataInputStream input = new DataInputStream(socket.getInputStream());
+            OutputStream output = socket.getOutputStream();
+            StringBuilder message = new StringBuilder();
+            message.append("ESP32-CMSIS-DAP (Port 4441): erreichbar\n");
+            try {
+                byte[] connect = dapTcpCommand(input, output, (byte) 0x02, (byte) 0x01);
+                if (connect.length < 2 || connect[1] != 1) {
+                    return message + "DAP_Connect: FEHLER, Antwortcode " +
+                            (connect.length >= 2 ? (connect[1] & 0xff) : -1);
+                }
+                message.append("SWD-Protokoll aktiviert: Ja\n");
+
+                final int[] clocks = {100000, 25000};
+                for (int hz : clocks) {
+                    byte[] clock = dapTcpCommand(input, output, (byte) 0x11,
+                        (byte) hz, (byte)(hz >>> 8), (byte)(hz >>> 16), (byte)(hz >>> 24));
+                    if (clock.length < 2 || clock[1] != 0)
+                        return message + "SWJ_Clock: FEHLER";
+
+                    byte[] transferCfg = dapTcpCommand(input, output,
+                        (byte) 0x04, (byte)0, (byte)100, (byte)0, (byte)0, (byte)0);
+                    if (transferCfg.length < 2 || transferCfg[1] != 0)
+                        return message + "Transfer-Konfiguration: FEHLER";
+
+                    byte[] swdCfg = dapTcpCommand(input, output, (byte) 0x13, (byte)0);
+                    if (swdCfg.length < 2 || swdCfg[1] != 0)
+                        return message + "SWD-Konfiguration: FEHLER";
+
+                    byte[][] seq = new byte[][] {
+                        {(byte)0x12, 56, -1, -1, -1, -1, -1, -1, -1},
+                        {(byte)0x12, 16, (byte)0x9e, (byte)0xe7},
+                        {(byte)0x12, 56, -1, -1, -1, -1, -1, -1, -1},
+                        {(byte)0x12, 8, 0},
+                    };
+                    for (byte[] cmd : seq) {
+                        byte[] answer = dapTcpCommand(input, output, cmd);
+                        if (answer.length < 2 || answer[1] != 0)
+                            return message + "SWJ-Sequenz: FEHLER";
+                    }
+
+                    // CMSIS-DAP_Transfer: index=0, count=1,
+                    // request=0x02: DP read, address 0 (DPIDR). No writes.
+                    byte[] answer = dapTcpCommand(input, output,
+                        (byte)0x05, (byte)0, (byte)1, (byte)0x02);
+                    if (answer.length < 3)
+                        return message + "DPIDR: ungültige CMSIS-DAP-Antwort";
+                    int ack = answer[2] & 0x07;
+                    message.append("SWD ").append(hz / 1000).append(" kHz: ")
+                        .append(swdAckName(ack)).append("\n");
+                    if (ack == 1 && answer.length >= 7) {
+                        long id = (answer[3] & 0xffL) | ((answer[4] & 0xffL) << 8)
+                            | ((answer[5] & 0xffL) << 16) | ((answer[6] & 0xffL) << 24);
+                        message.append(String.format(Locale.ROOT,
+                            "Gelesene DPIDR: 0x%08X\n", id));
+                        message.append(id == 0x1ba01477L
+                            ? "ARM-Debug-Port erkannt. Die Verbindung funktioniert.\n"
+                            : "DPIDR weicht vom erwarteten Wert 0x1BA01477 ab.\n");
+                        return message.toString();
+                    }
+                }
+                message.append("Keine gültige Debug-Port-ID empfangen.\n");
+                message.append("Das grenzt das Problem auf SWD-Signale, Zielversorgung oder SWD-Protokoll ein; Ursache nicht belegt.");
+                return message.toString();
+            } finally {
+                try { dapTcpCommand(input, output, (byte) 0x03); }
+                catch (Exception ignored) { }
+            }
+        }
+    }
+
+    private void checkSwdDirect() {
+        if (!busy.compareAndSet(false, true)) {
+            showResult("SWD-Prüfung", "Eine andere Anfrage läuft. Bitte erneut drücken.");
+            return;
+        }
+        final String ip = currentHost;
+        updateBanner("Direkte SWD-Prüfung über ESP32 läuft …", false);
+        worker.execute(() -> {
+            try {
+                String result = checkSwdCommands(ip);
+                showResult("SWD-Diagnose · " + ip, result);
+            } catch (Exception error) {
+                showResult("SWD-Diagnose · " + ip,
+                    "Direkte SWD-Abfrage nicht abgeschlossen: " +
+                    error.getClass().getSimpleName() + ": " + error.getMessage());
+            } finally {
+                busy.set(false);
+                runOnUiThread(() -> refresh());
+            }
+        });
+    }
+
     private void showResult(String title, String description) {
         runOnUiThread(() -> new AlertDialog.Builder(this).setTitle(title)
                 .setMessage(description).setPositiveButton("OK", null).show());
