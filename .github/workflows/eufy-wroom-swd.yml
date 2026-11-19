@@ -4,6 +4,7 @@ on:
     branches:
       - feature/eufy-wroom-cmsis-dap
       - feature/eufy-wroom-ota
+      - feature/eufy-wroom-swd-safe
     paths:
       - ".github/workflows/eufy-wroom-swd.yml"
       - "eufy-wroom/**"
