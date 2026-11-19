@@ -29,6 +29,8 @@ typedef struct {
     bool host_connected;
     uint32_t dpidr;
     uint32_t errors;
+    uint32_t swd_clock_hz;
+    uint8_t swd_last_ack;
     int64_t updated_us;
     int32_t left_ticks, right_ticks;
     uint16_t left_window, right_window;
@@ -56,6 +58,10 @@ static portMUX_TYPE latest_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool swd_ready = false;
 static int64_t next_poll_us = 0;
 static bool external_host = false;
+static uint8_t swd_last_ack = 0;
+static uint32_t swd_last_clock = 0;
+static uint32_t swd_observed_dpidr = 0;
+static const char *swd_failed_step = "swd_not_initialized";
 
 static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -74,6 +80,8 @@ static bool dpap(uint8_t reg, bool read, uint32_t *word) {
     uint8_t resp[16] = {0};
     if (!read) put32(&req[4], *word);
     uint32_t size = DAP_ProcessCommand(req, resp) & 0xffffU;
+    if (size >= 3 && resp[0] == ID_DAP_Transfer)
+        swd_last_ack = resp[2];
     if (resp[0] != ID_DAP_Transfer || resp[1] != 1 ||
         resp[2] != DAP_TRANSFER_OK || size != (read ? 7U : 3U))
         return false;
@@ -90,20 +98,33 @@ static bool ap_write(uint8_t offset, uint32_t value) {
     return dpap(offset | DAP_TRANSFER_APnDP, false, &value);
 }
 
-static bool swd_init(uint32_t *dpidr) {
+/* No MCU reset or halt. All failures are assigned an observable stage. */
+static bool swd_init(uint32_t *dpidr, uint32_t clock_hz) {
+    swd_last_ack = 0;
+    swd_last_clock = clock_hz;
+    swd_observed_dpidr = 0;
+    *dpidr = 0;
+
+    swd_failed_step = "swd_connect_failed";
     const uint8_t conn[] = {ID_DAP_Connect, DAP_PORT_SWD};
     uint8_t reply[16] = {0};
-    (void)DAP_ProcessCommand(conn, reply);
-    if (reply[0] != ID_DAP_Connect || reply[1] != DAP_PORT_SWD) return false;
+    uint32_t length = DAP_ProcessCommand(conn, reply) & 0xffffU;
+    if (length < 2 || reply[0] != ID_DAP_Connect || reply[1] != DAP_PORT_SWD)
+        return false;
 
-    // 100 kHz, no SWD reset of the target CPU.
-    const uint8_t clock[] = {ID_DAP_SWJ_Clock, 0xA0, 0x86, 0x01, 0x00};
+    swd_failed_step = "swd_clock_failed";
+    const uint8_t clock[] = {ID_DAP_SWJ_Clock,
+        (uint8_t)clock_hz, (uint8_t)(clock_hz >> 8),
+        (uint8_t)(clock_hz >> 16), (uint8_t)(clock_hz >> 24)};
     if (!dap_simple(clock, ID_DAP_SWJ_Clock)) return false;
-    const uint8_t config[] = {ID_DAP_TransferConfigure, 0, 100, 0, 0, 0};
-    if (!dap_simple(config, ID_DAP_TransferConfigure)) return false;
-    const uint8_t swd_conf[] = {ID_DAP_SWD_Configure, 0};
-    if (!dap_simple(swd_conf, ID_DAP_SWD_Configure)) return false;
 
+    swd_failed_step = "swd_config_failed";
+    const uint8_t config[] = {ID_DAP_TransferConfigure, 0, 100, 0, 0, 0};
+    const uint8_t swd_conf[] = {ID_DAP_SWD_Configure, 0};
+    if (!dap_simple(config, ID_DAP_TransferConfigure) ||
+        !dap_simple(swd_conf, ID_DAP_SWD_Configure)) return false;
+
+    swd_failed_step = "swd_sequence_failed";
     // ARM SWJ line reset -> JTAG-to-SWD (0xE79E LSB first) -> reset -> idle.
     const uint8_t reset1[] = {ID_DAP_SWJ_Sequence, 56, 255,255,255,255,255,255,255};
     const uint8_t switch_swd[] = {ID_DAP_SWJ_Sequence, 16, 0x9e, 0xe7};
@@ -114,10 +135,22 @@ static bool swd_init(uint32_t *dpidr) {
         !dap_simple(reset2, ID_DAP_SWJ_Sequence) ||
         !dap_simple(idle, ID_DAP_SWJ_Sequence)) return false;
 
-    if (!dp_read(0x00, dpidr) || *dpidr != DP_ID_EXPECTED) return false;
-    // Clear debug-port sticky fault bits, request debug/system power.
-    if (!dp_write(0x00, 0x1eU) ||
-        !dp_write(0x04, 0x50000000U)) return false;
+    swd_failed_step = "swd_dpidr_read_failed";
+    if (!dp_read(0x00, dpidr)) {
+        swd_failed_step = swd_last_ack == DAP_TRANSFER_WAIT ? "swd_dpidr_wait" :
+                          swd_last_ack == DAP_TRANSFER_FAULT ? "swd_dpidr_fault" :
+                          "swd_dpidr_no_ack";
+        return false;
+    }
+    swd_observed_dpidr = *dpidr;
+    swd_failed_step = "swd_dpidr_mismatch";
+    if (*dpidr != DP_ID_EXPECTED) return false;
+
+    // Debug-port configuration is required for read-only AHB-AP access.
+    // No writes to target memory or CPU registers, no reset, no halt.
+    swd_failed_step = "swd_dp_power_failed";
+    if (!dp_write(0x00, 0x1eU) || !dp_write(0x04, 0x50000000U))
+        return false;
     bool powered = false;
     for (int i = 0; i < 20; ++i) {
         uint32_t ctrl = 0;
@@ -127,9 +160,20 @@ static bool swd_init(uint32_t *dpidr) {
         }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
-    if (!powered || !dp_write(0x08, 0)) return false;
-    // MEM-AP CSW: HPROT=0x23, 32-bit transfer, single auto-increment.
-    return ap_write(0x00, 0x23000052U);
+    if (!powered) return false;
+    swd_failed_step = "swd_ap_select_failed";
+    if (!dp_write(0x08, 0)) return false;
+    swd_failed_step = "swd_ap_config_failed";
+    if (!ap_write(0x00, 0x23000052U)) return false;
+    swd_failed_step = "ok";
+    return true;
+}
+
+static void swd_disconnect_adapter(void) {
+    // Releases only the probe's GPIO; does not reset the GD32.
+    const uint8_t command[] = {ID_DAP_Disconnect};
+    uint8_t response[4] = {0};
+    (void)DAP_ProcessCommand(command, response);
 }
 
 static bool read_words(uint32_t address, uint16_t count, uint32_t *dst) {
@@ -149,6 +193,9 @@ static void status_set(const char *state, bool invalidate) {
     portENTER_CRITICAL(&latest_mux);
     if (invalidate) latest.valid = false;
     latest.errors++;
+    latest.swd_last_ack = swd_last_ack;
+    latest.swd_clock_hz = swd_last_clock;
+    latest.dpidr = swd_observed_dpidr;
     snprintf(latest.status, sizeof(latest.status), "%s", state);
     portEXIT_CRITICAL(&latest_mux);
 }
@@ -172,8 +219,20 @@ void eufy_monitor_poll(void) {
 
     uint32_t dpidr = 0;
     if (!swd_ready) {
-        if (!swd_init(&dpidr)) {
-            status_set("swd_init_failed", true);
+        // If the initial SWD clock does not work, retry once at a lower
+        // frequency. Both attempts are read-only for the GD32.
+        const uint32_t frequencies[] = {100000U, 25000U};
+        bool initialized = false;
+        for (size_t i = 0; i < sizeof(frequencies)/sizeof(frequencies[0]); ++i) {
+            if (swd_init(&dpidr, frequencies[i])) {
+                initialized = true;
+                break;
+            }
+            // Preserve the most recent stage/ACK in telemetry for diagnostics.
+            status_set(swd_failed_step, true);
+            swd_disconnect_adapter();
+        }
+        if (!initialized) {
             next_poll_us = now + EUFY_RETRY_MS * 1000LL;
             return;
         }
@@ -258,6 +317,8 @@ void eufy_monitor_poll(void) {
         for (int i = 0; i < 5; i++) latest.gpio_idr[i] = (uint16_t)gpio_inputs[i];
     latest.valid = true;
     latest.dpidr = DP_ID_EXPECTED;
+    latest.swd_last_ack = swd_last_ack;
+    latest.swd_clock_hz = swd_last_clock;
     latest.updated_us = esp_timer_get_time();
     latest.left_window = wheels[0] & 0xffffU;
     latest.right_window = wheels[0] >> 16;
@@ -314,6 +375,7 @@ static esp_err_t eufy_telemetry_handler(httpd_req_t *req) {
     int pn = snprintf(payload, payload_cap,
         "{\"status\":\"%s\",\"valid\":%s,\"openocd_connected\":%s,"
         "\"sample_age_ms\":%lld,\"errors\":%lu,\"dpidr\":\"0x%08lx\","
+        "\"swd_last_ack\":%u,\"swd_clock_hz\":%lu,"
         "\"wheel\":{\"left_ticks\":%ld,\"right_ticks\":%ld,"
         "\"left_window\":%u,\"right_window\":%u,"
         "\"left_last_window\":%u,\"right_last_window\":%u,"
@@ -347,6 +409,7 @@ static esp_err_t eufy_telemetry_handler(httpd_req_t *req) {
         s.status, s.valid ? "true" : "false",
         s.host_connected ? "true" : "false",
         (long long)age_ms, (unsigned long)s.errors, (unsigned long)s.dpidr,
+        s.swd_last_ack, (unsigned long)s.swd_clock_hz,
         (long)s.left_ticks, (long)s.right_ticks, s.left_window, s.right_window,
         s.left_last_window, s.right_last_window,
         s.left_current_adc, s.right_current_adc,
